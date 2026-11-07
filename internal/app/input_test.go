@@ -111,3 +111,14 @@ func TestModifiedNavigation(t *testing.T) {
 		t.Fatalf("Ctrl+Shift+Delete=%q", got)
 	}
 }
+
+func TestMenuEnterWorksWithoutTextInput(t *testing.T) {
+	a := &App{menu: true, menuIndex: 7}
+	if a.textInputConfig().Active {
+		t.Fatal("menu must not activate the IME")
+	}
+	a.keydown(input.KeyEnter)
+	if a.menu || a.overlay != "settings" {
+		t.Fatalf("Enter did not activate Settings: menu=%v overlay=%q", a.menu, a.overlay)
+	}
+}

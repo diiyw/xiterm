@@ -107,7 +107,7 @@ func Run(opts Options) error {
 	}
 	defer a.disposeIcons()
 	a.win.SetVsyncEnabled(true)
-	a.win.SetTargetFPS(60)
+	a.win.SetTargetFPS(30)
 	regular, bold := assets.Regular, assets.Bold
 	if a.cfg.FontPath != "" {
 		b, err := os.ReadFile(a.cfg.FontPath)
@@ -177,6 +177,7 @@ func Run(opts Options) error {
 		}
 		a.dirty = false
 		a.layout()
+		a.win.SetTextInputConfig(a.textInputConfig())
 		a.paint.canvas = a.win.Canvas2D(w, h)
 		a.draw()
 		a.paint.regular.FlushUploads()

@@ -72,7 +72,6 @@ func (a *App) mods() uv.KeyMod {
 }
 
 func (a *App) bindInput() {
-	a.win.SetTextInputConfig(input.TextInputConfig{Active: true, Multiline: true, Revision: 1})
 	a.win.OnKeydown(func(key input.KeyCode) {
 		if a.keyModifiers != nil && key != input.KeyCapsLock && (key < input.KeyLeftShift || key > input.KeyRightSuper) {
 			if mods, ok := a.keyModifiers(key); ok {
@@ -257,6 +256,8 @@ func (a *App) keydown(key input.KeyCode) {
 			}
 		case input.KeyDown:
 			a.menuIndex = (a.menuIndex + 1) % len(a.menuItems())
+		case input.KeyEnter:
+			a.activateMenu(a.menuIndex)
 		}
 		return
 	}
