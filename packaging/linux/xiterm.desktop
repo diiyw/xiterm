@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=XiTerm
+Comment=Native terminal powered by Onix
+Exec=xiterm
+Icon=xiterm
+Terminal=false
+Categories=System;TerminalEmulator;

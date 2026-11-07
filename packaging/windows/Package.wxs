@@ -1,0 +1,38 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="XiTerm" Manufacturer="XiTerm" Version="$(var.Version)"
+           UpgradeCode="588E216D-73A0-420C-8176-D045E3B87818" Scope="perMachine" Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of XiTerm is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="XiTermIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="XiTermIcon" />
+    <Property Id="WINDOWSBUILD" Secure="yes">
+      <RegistrySearch Id="WindowsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWSBUILD &gt;= 17763)"
+            Message="XiTerm requires 64-bit Windows 10 version 1809 or later." />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="XiTerm">
+        <Component Id="Executable" Guid="*">
+          <File Id="XiTermExe" Source="$(var.SourceDir)\xiterm.exe" KeyPath="yes" />
+        </Component>
+        <Directory Id="NoticesDirectory" Name="Notices" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuDirectory" Name="XiTerm">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut Id="XiTermShortcut" Name="XiTerm" Target="[INSTALLFOLDER]xiterm.exe"
+                    WorkingDirectory="INSTALLFOLDER" Icon="XiTermIcon" />
+          <RemoveFolder Id="RemoveStartMenuDirectory" On="uninstall" />
+          <RegistryValue Root="HKLM" Key="Software\XiTerm" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="XiTerm" Level="1">
+      <ComponentRef Id="Executable" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentGroupRef Id="Notices" />
+    </Feature>
+  </Package>
+</Wix>

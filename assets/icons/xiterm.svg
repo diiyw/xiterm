@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#343B58"/>
+      <stop offset="55%" stop-color="#1B2239"/>
+      <stop offset="100%" stop-color="#101522"/>
+    </linearGradient>
+    <linearGradient id="window" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#303B54"/>
+      <stop offset="100%" stop-color="#171F32"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111B2C"/>
+      <stop offset="100%" stop-color="#080F1C"/>
+    </linearGradient>
+    <linearGradient id="cursor" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8DFFCB"/>
+      <stop offset="100%" stop-color="#31DDA3"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <!-- Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Background glow -->
+  <ellipse cx="256" cy="390" rx="170" ry="65" fill="#667AFF" opacity=".15" filter="url(#shadow)"/>
+  <!-- Window shadow -->
+  <rect x="68" y="112" width="376" height="300" rx="35" fill="#000000" opacity=".45" filter="url(#shadow)"/>
+  <!-- Terminal window -->
+  <rect x="68" y="100" width="376" height="300" rx="35" fill="url(#window)" stroke="#596780" stroke-opacity=".65" stroke-width="2"/>
+  <!-- Title bar -->
+  <path d="M103 100 H409 Q444 100 444 135 V159 H68 V135 Q68 100 103 100Z" fill="#3A465E"/>
+  <!-- Divider -->
+  <path d="M68 159 H444" stroke="#64718A" stroke-opacity=".35" stroke-width="2"/>
+  <!-- Traffic lights -->
+  <circle cx="105" cy="130" r="9" fill="#FF625B"/>
+  <circle cx="135" cy="130" r="9" fill="#FFBD44"/>
+  <circle cx="165" cy="130" r="9" fill="#35CA72"/>
+  <!-- Screen -->
+  <rect x="88" y="178" width="336" height="200" rx="15" fill="url(#screen)"/>
+  <!-- Prompt -->
+  <path d="M153 236 L205 278 L153 320" fill="none" stroke="#F4F7FF" stroke-width="19" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Cursor -->
+  <rect x="237" y="300" width="76" height="19" rx="5" fill="url(#cursor)" filter="url(#glow)"/>
+  <!-- Small terminal details -->
+  <circle cx="118" cy="350" r="4" fill="#62728F" opacity=".65"/>
+  <path d="M135 350 H190" stroke="#62728F" stroke-width="5" stroke-linecap="round" opacity=".5"/>
+</svg>

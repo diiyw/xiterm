@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/artifacts/
+go.work
+go.work.sum
+*.log
+
+cmd/xiterm/rsrc_windows_*.syso
+__pycache__/
