@@ -11,7 +11,7 @@
 Debian / Ubuntu 安装原生依赖：
 
 ```sh
-sudo apt install build-essential pkg-config libx11-dev libxext-dev libxrender-dev libxi-dev libwayland-dev libxkbcommon-dev
+sudo apt install build-essential pkg-config libx11-dev libxext-dev libxrender-dev libxi-dev libwayland-dev libxkbcommon-dev libgl-dev
 make run
 ```
 

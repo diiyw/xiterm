@@ -128,7 +128,9 @@ func TestPaletteMouseModesAndBracketedPaste(t *testing.T) {
 	if s.MouseTracking {
 		t.Fatal("mouse mode did not reset")
 	}
-	if !strings.Contains(s.Term.String(), "1b 5b 32 30 30 7e 61 62 63 1b 5b 32 30 31 7e") {
+	// BSD and GNU od use different spacing between hexadecimal bytes.
+	output := strings.Join(strings.Fields(s.Term.String()), " ")
+	if !strings.Contains(output, "1b 5b 32 30 30 7e 61 62 63 1b 5b 32 30 31 7e") {
 		t.Fatalf("bracketed paste encoding: %q", s.Term.String())
 	}
 }
