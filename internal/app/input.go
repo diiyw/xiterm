@@ -10,9 +10,9 @@ import (
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
-	"github.com/onix-engine/onix/input"
 	"github.com/diiyw/xiterm/internal/terminal"
 	"github.com/diiyw/xiterm/internal/workspace"
+	"github.com/onix-engine/onix/input"
 )
 
 func directoryFromURL(value string) string {
@@ -34,6 +34,23 @@ func (a *App) ctrl() bool  { return a.keys[input.KeyLeftControl] || a.keys[input
 func (a *App) shift() bool { return a.keys[input.KeyLeftShift] || a.keys[input.KeyRightShift] }
 func (a *App) alt() bool   { return a.keys[input.KeyLeftAlt] || a.keys[input.KeyRightAlt] }
 func (a *App) super() bool { return a.keys[input.KeyLeftSuper] || a.keys[input.KeyRightSuper] }
+
+// Reconcile both sides from a native event snapshot; key-up can be lost when
+// the window loses focus or macOS consumes a Command shortcut.
+func (a *App) syncModifiers(mods uv.KeyMod) {
+	for _, pair := range []struct {
+		left, right input.KeyCode
+		mod         uv.KeyMod
+	}{
+		{input.KeyLeftShift, input.KeyRightShift, uv.ModShift},
+		{input.KeyLeftControl, input.KeyRightControl, uv.ModCtrl},
+		{input.KeyLeftAlt, input.KeyRightAlt, uv.ModAlt},
+		{input.KeyLeftSuper, input.KeyRightSuper, uv.ModSuper},
+	} {
+		delete(a.keys, pair.right)
+		a.keys[pair.left] = mods&pair.mod != 0
+	}
+}
 func (a *App) shortcut() bool {
 	if runtime.GOOS == "darwin" {
 		return a.super()
@@ -56,12 +73,23 @@ func (a *App) mods() uv.KeyMod {
 
 func (a *App) bindInput() {
 	a.win.SetTextInputConfig(input.TextInputConfig{Active: true, Multiline: true, Revision: 1})
-	a.win.OnKeydown(func(key input.KeyCode) { a.keys[key] = true; a.keydown(key); a.dirty = true; a.blink = false })
+	a.win.OnKeydown(func(key input.KeyCode) {
+		if a.keyModifiers != nil && key != input.KeyCapsLock && (key < input.KeyLeftShift || key > input.KeyRightSuper) {
+			if mods, ok := a.keyModifiers(key); ok {
+				a.syncModifiers(mods)
+			}
+		}
+		a.keys[key] = true
+		a.keydown(key)
+		a.dirty = true
+		a.blink = false
+	})
 	a.win.OnKeyup(func(key input.KeyCode) { delete(a.keys, key) })
 	a.win.OnTextInput(func(value string) {
 		if a.ctrl() || a.super() || a.overlay != "" {
 			return
 		}
+		a.menu = false
 		if a.search {
 			a.query += value
 			a.matchIndex = -1
@@ -78,6 +106,12 @@ func (a *App) bindInput() {
 		a.blink = false
 	})
 	a.win.OnTextCommand(func(command input.TextCommand) {
+		if a.menu {
+			if command == input.TextCommandEnter {
+				a.activateMenu(a.menuIndex)
+			}
+			return
+		}
 		if a.overlay != "" {
 			return
 		}
@@ -96,9 +130,14 @@ func (a *App) bindInput() {
 				a.nextMatch(delta)
 			}
 		} else if p := a.pane(); p != nil {
-			code := uv.KeyEnter
-			if command == input.TextCommandBackspace {
+			var code rune
+			switch command {
+			case input.TextCommandEnter:
+				code = uv.KeyEnter
+			case input.TextCommandBackspace:
 				code = uv.KeyBackspace
+			default:
+				return
 			}
 			if code == uv.KeyBackspace && a.ctrl() {
 				p.Session.SendText("\x17")
@@ -115,6 +154,11 @@ func (a *App) bindInput() {
 	a.win.OnMouseDown(func(x, y float64, b input.MouseButton) { a.mouseDown(float32(x), float32(y), b) })
 	a.win.OnMouseMove(func(x, y float64) {
 		a.mouseX, a.mouseY = float32(x), float32(y)
+		a.dirty = true
+		if a.menu {
+			a.menuIndex = a.menuItemAt(float32(x), float32(y))
+			return
+		}
 		if a.dragSplit != nil {
 			a.dragSplit.DragDivider(float32(x), float32(y))
 			a.dirty = true
@@ -146,7 +190,7 @@ func (a *App) bindInput() {
 		}
 	})
 	a.win.OnMouseWheel(func(_, dy float64) {
-		if a.overlay != "" || a.search {
+		if a.overlay != "" || a.search || a.menu {
 			return
 		}
 		if p := a.pane(); p != nil {
@@ -188,7 +232,8 @@ func (a *App) bindInput() {
 
 func (a *App) keydown(key input.KeyCode) {
 	if key == input.KeyEscape {
-		dismissing := a.search || a.overlay != ""
+		dismissing := a.search || a.overlay != "" || a.menu
+		a.menu = false
 		a.search = false
 		a.overlay = ""
 		a.dragPane = nil
@@ -199,6 +244,19 @@ func (a *App) keydown(key input.KeyCode) {
 			if !dismissing {
 				p.Session.SendKey(uv.KeyPressEvent{Code: uv.KeyEscape})
 			}
+		}
+		return
+	}
+	if a.menu {
+		switch key {
+		case input.KeyUp:
+			if a.menuIndex < 0 {
+				a.menuIndex = len(a.menuItems()) - 1
+			} else {
+				a.menuIndex = (a.menuIndex - 1 + len(a.menuItems())) % len(a.menuItems())
+			}
+		case input.KeyDown:
+			a.menuIndex = (a.menuIndex + 1) % len(a.menuItems())
 		}
 		return
 	}
@@ -294,7 +352,15 @@ func (a *App) keydown(key input.KeyCode) {
 		}
 		return
 	}
-	if a.overlay != "" || a.search {
+	if a.search && a.overlay == "" {
+		if key == input.KeyUp {
+			a.nextMatch(-1)
+		} else if key == input.KeyDown {
+			a.nextMatch(1)
+		}
+		return
+	}
+	if a.overlay != "" {
 		return
 	}
 	p := a.pane()
@@ -405,11 +471,36 @@ func (a *App) copySelection() {
 }
 func (a *App) position(p *workspace.Pane, x, y float32) terminal.Position {
 	col := max(0, min(p.Session.Term.Width()-1, int((x-p.Bounds.X-12)/a.paint.cellW)))
-	row := max(0, min(p.Session.Term.Height()-1, int((y-p.Bounds.Y-paneHeadH-8)/a.paint.lineH)))
+	row := max(0, min(p.Session.Term.Height()-1, int((y-p.Bounds.Y-a.paneHeaderHeight(p)-8)/a.paint.lineH)))
 	return terminal.Position{Row: p.Session.HistoryLen() - p.Scroll + row, Col: col}
 }
 func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 	a.dirty = true
+	if b == input.MouseRight {
+		if a.overlay != "" {
+			return
+		}
+		if t := a.tab(); t != nil {
+			for _, p := range t.Root.Panes() {
+				if p.Bounds.Contains(x, y) {
+					if t.Active != p {
+						t.Active = p
+						a.resetSearch()
+					}
+					break
+				}
+			}
+		}
+		a.dragPane, a.dragSplit, a.mousePane = nil, nil, nil
+		a.menu, a.menuX, a.menuY, a.menuIndex = true, x, y, -1
+		return
+	}
+	if a.menu {
+		if b == input.MouseLeft {
+			a.activateMenu(a.menuItemAt(x, y))
+		}
+		return
+	}
 	if b == input.MouseMiddle {
 		a.paste()
 		return
@@ -437,7 +528,7 @@ func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 				t.Active = p
 				a.resetSearch()
 				p.Selected = false
-				if p.Session.MouseTracking && !a.shift() && y >= p.Bounds.Y+paneHeadH {
+				if p.Session.MouseTracking && !a.shift() && y >= p.Bounds.Y+a.paneHeaderHeight(p) {
 					a.mousePane = p
 					p.Session.SendMouse(uv.MouseClickEvent(a.mouseEvent(p, x, y, uv.MouseLeft)))
 					return

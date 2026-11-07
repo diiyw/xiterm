@@ -11,22 +11,21 @@ import (
 	"strings"
 	"time"
 
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/diiyw/xiterm/assets"
+	"github.com/diiyw/xiterm/internal/config"
+	"github.com/diiyw/xiterm/internal/terminal"
+	"github.com/diiyw/xiterm/internal/workspace"
 	"github.com/onix-engine/onix/graphics"
 	"github.com/onix-engine/onix/input"
 	"github.com/onix-engine/onix/text"
 	"github.com/onix-engine/onix/window"
 	iconpng "github.com/onix-engine/onix/window/codec/png"
-	"github.com/diiyw/xiterm/assets"
-	"github.com/diiyw/xiterm/internal/config"
-	"github.com/diiyw/xiterm/internal/terminal"
-	"github.com/diiyw/xiterm/internal/workspace"
 )
 
 const (
-	toolbarH  float32 = 46
-	tabsH     float32 = 38
-	statusH   float32 = 28
-	paneHeadH float32 = 26
+	tabsH     float32 = 42
+	paneHeadH float32 = 24
 	searchH   float32 = 38
 )
 
@@ -38,6 +37,8 @@ type button struct {
 }
 type App struct {
 	logo           *graphics.Texture
+	icons          map[string]*graphics.Texture
+	keyModifiers   func(input.KeyCode) (uv.KeyMod, bool)
 	nerdFont       *text.Font
 	mousePane      *workspace.Pane
 	dragSplit      *workspace.Node
@@ -59,6 +60,9 @@ type App struct {
 	searchRevision uint64
 	searchSession  *terminal.Session
 	overlay        string
+	menu           bool
+	menuX, menuY   float32
+	menuIndex      int
 	notice         string
 	noticeUntil    time.Time
 	dragPane       *workspace.Pane
@@ -94,7 +98,14 @@ func Run(opts Options) error {
 	draw.Draw(rgba, rgba.Bounds(), icon, icon.Bounds().Min, draw.Src)
 	a.logo = graphics.CreateTextureByImageNoMipmap(rgba)
 	defer a.logo.Dispose()
-	a.win.SetViewportMode(window.ViewportModeExpand)
+	// Adaptive uses native logical pixels, including when the window shrinks.
+	// Expand scales a fixed scene and would leave the PTY grid unchanged.
+	a.win.SetViewport(1, 1)
+	a.win.SetViewportMode(window.ViewportModeAdaptive)
+	if err := a.loadIcons(); err != nil {
+		return err
+	}
+	defer a.disposeIcons()
 	a.win.SetVsyncEnabled(true)
 	a.win.SetTargetFPS(60)
 	regular, bold := assets.Regular, assets.Bold
@@ -131,6 +142,8 @@ func Run(opts Options) error {
 	}
 	defer a.closeAll()
 	a.bindInput()
+	cleanupInput := a.installNativeInput()
+	defer cleanupInput()
 	if opts.SmokeDuration > 0 {
 		a.smokeDeadline = time.Now().Add(opts.SmokeDuration)
 	}
@@ -239,21 +252,26 @@ func (a *App) split(axis workspace.Axis) {
 	a.dirty = true
 }
 func (a *App) closePane() {
-	t := a.tab()
-	if t == nil {
+	a.closePaneAt(a.active, a.pane())
+}
+func (a *App) closePaneAt(index int, p *workspace.Pane) {
+	if p == nil || index < 0 || index >= len(a.tabs) {
 		return
 	}
-	p := t.Active
+	t := a.tabs[index]
 	p.Session.Close()
 	t.Root = t.Root.Remove(p)
 	if t.Root == nil {
-		a.tabs = append(a.tabs[:a.active], a.tabs[a.active+1:]...)
+		a.tabs = append(a.tabs[:index], a.tabs[index+1:]...)
 		if len(a.tabs) == 0 {
 			a.win.RequestClose()
 			return
 		}
+		if a.active > index {
+			a.active--
+		}
 		a.active = min(a.active, len(a.tabs)-1)
-	} else {
+	} else if t.Active == p {
 		t.Active = t.Root.Panes()[0]
 	}
 	a.dragPane = nil
@@ -308,6 +326,14 @@ func (a *App) poll() {
 			}
 		})
 	}
+	// Remove exited sessions after polling so slice mutations cannot skip a tab.
+	for i := len(a.tabs) - 1; i >= 0; i-- {
+		for _, p := range a.tabs[i].Root.Panes() {
+			if p.Session.Exited {
+				a.closePaneAt(i, p)
+			}
+		}
+	}
 	if p := a.pane(); p != nil {
 		if a.search && (a.searchSession != p.Session || a.searchRevision != p.Session.Revision) {
 			a.updateSearch(false)
@@ -320,22 +346,33 @@ func (a *App) poll() {
 	}
 }
 func (a *App) layout() {
-	top := toolbarH + tabsH
+	top := tabsH
 	if a.search {
 		top += searchH
 	}
 	for _, t := range a.tabs {
-		t.Root.Layout(workspace.Rect{X: 0, Y: top, W: a.width, H: max(1, a.height-top-statusH)})
+		t.Root.Layout(workspace.Rect{X: 0, Y: top, W: a.width, H: max(1, a.height-top)})
 		// Hidden tabs retain their viewport and resize together to avoid a stale PTY size.
 		t.Root.Visit(func(p *workspace.Pane) {
 			cols := max(2, int((p.Bounds.W-24)/a.paint.cellW))
-			rows := max(1, int((p.Bounds.H-paneHeadH-16)/a.paint.lineH))
+			rows := max(1, int((p.Bounds.H-a.paneHeaderHeight(p)-16)/a.paint.lineH))
 			if err := p.Session.Resize(cols, rows); err != nil && p.Session.IOErr == nil {
 				p.Session.IOErr = err
 				a.notify(err.Error())
 			}
 		})
 	}
+}
+func (a *App) paneHeaderHeight(p *workspace.Pane) float32 {
+	for _, t := range a.tabs {
+		panes := t.Root.Panes()
+		for _, pane := range panes {
+			if pane == p && len(panes) > 1 {
+				return paneHeadH
+			}
+		}
+	}
+	return 0
 }
 func (a *App) resetSearch() {
 	a.searchSession = nil
@@ -429,13 +466,6 @@ func (a *App) runAction(fn func() error) {
 		a.notify(err.Error())
 	}
 	a.dirty = true
-}
-func (a *App) profileLabel() string {
-	p := a.pane()
-	if p == nil {
-		return ""
-	}
-	return fmt.Sprintf("%s  /  %s", p.Session.Profile.Name, filepath.Base(p.Session.Profile.Shell))
 }
 
 func (a *App) currentProfile() config.Profile {

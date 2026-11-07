@@ -41,7 +41,7 @@ func Default() Config {
 		args = []string{"/Q"}
 	}
 	home, _ := os.UserHomeDir()
-	return Config{Profiles: []Profile{{Name: "Default", Shell: shell, Args: args, Directory: home}}, DefaultProfile: "Default", FontSize: 15, Scrollback: 10000, Width: 1200, Height: 780}
+	return Config{Profiles: []Profile{{Name: "Default", Shell: shell, Args: args, Directory: home}}, DefaultProfile: "Default", FontSize: 15, Scrollback: 10000, Width: 1440, Height: 900}
 }
 
 func Path() (string, error) {

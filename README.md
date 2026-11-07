@@ -35,13 +35,13 @@ Linux / macOS 默认使用 `$SHELL` 和登录 shell 参数 `-l`；未设置 `$SH
 ## 已实现
 
 - 真实 PTY shell、UTF-8 字符、ANSI / VT 解析、16 / 256 色和真彩色。
-- 独立标签页、递归横向 / 纵向分屏、拖动分隔线调整比例、面板焦点切换。
-- 窗口和字体大小变化同步至 PTY，支持 SIGWINCH。
+- 顶部单行标签页、右键上下文菜单、SVG 操作图标；递归横向 / 纵向分屏、拖动分隔线调整比例、面板焦点切换。
+- 窗口默认 1440 × 900；放大、缩小及字体大小变化时重算终端行列并同步至 PTY，支持 SIGWINCH。
 - 主屏幕历史滚动、历史搜索、匹配高亮、拖动文本选择、系统剪贴板复制粘贴。
 - 应用光标模式、备用屏幕、终端查询响应、括号粘贴、基础 TUI 鼠标事件。
 - JSON 配置、多 shell profiles、起始目录、自定义环境变量、自定义字体、设置保存。
 - OSC 0/2 标题、OSC 7 工作目录、文件拖入后生成带引号的路径。
-- 会话退出状态显示，关闭活动会话时清理 shell 进程组。
+- `exit` 或 shell 结束后自动关闭对应面板，空标签自动移除；最后一个标签关闭后退出程序，清理 shell 进程组。
 - 空闲时等待窗口事件 / PTY 输出，光标闪烁时刷新。
 
 ## 快捷键
@@ -69,7 +69,7 @@ Linux 使用 `Ctrl+Shift`，macOS 使用 `Cmd` 作为应用快捷键前缀。`Ct
 | 全屏 | F11 | F11 |
 | 帮助 | F1 | F1 |
 
-搜索时输入查询，`Enter` / `Shift+Enter` 选择下一个 / 上一个匹配，`Esc` 返回终端。TUI 开启鼠标捕获时，按住 `Shift` 可拖动选择文本。工具栏也提供新标签页、分屏、搜索和配置入口。
+终端中的 `↑` / `↓` 传给 shell，用于预览、选择命令历史；`Enter` 才执行选中的命令，`↓` 可返回尚未提交的输入（具体行为由 shell 决定）。搜索时输入查询，`↓` / `↑` 或 `Enter` / `Shift+Enter` 选择下一个 / 上一个匹配，`Esc` 返回终端。右键菜单提供新标签页、分屏、复制粘贴、搜索、Profiles、设置及帮助，支持上下键选择、`Enter` 确认、`Esc` 关闭。TUI 开启鼠标捕获时，按住 `Shift` 可拖动选择文本。
 
 ## 配置
 
@@ -87,8 +87,8 @@ Linux 默认为 `~/.config/xiterm/config.json`（遵循 `XDG_CONFIG_HOME`）；m
   "default_profile": "Default",
   "font_size": 15,
   "scrollback": 10000,
-  "width": 1200,
-  "height": 780,
+  "width": 1440,
+  "height": 900,
   "profiles": [
     {
       "name": "Default",
@@ -138,7 +138,7 @@ make smoke
 make native-test
 ```
 
-完整检查向真实 X11 窗口发送键盘事件，验证命令执行、独立标签页、嵌套分屏、设置保存和 shell 清理，截图输出至 `artifacts/native-smoke.png`。没有启动 Onix 项目编辑器。
+完整检查向真实 X11 窗口发送键盘和鼠标事件，验证 `cd` 文本输入、上下键历史选择及草稿恢复、窗口放大/缩小时真实 PTY 行列变化、右键菜单、独立标签页、嵌套分屏、设置保存、`exit` 关闭及最后标签退出，截图输出至 `artifacts/native-smoke.png` 和 `artifacts/context-menu.png`。没有启动 Onix 项目编辑器。
 
 ## 结构与后续工作
 
@@ -200,7 +200,7 @@ CI 包含 Go 测试、字体字形与等宽检查、工作流版本校验、真�
 
 ## 应用图标
 
-图标源为 [`assets/icons/xiterm.svg`](assets/icons/xiterm.svg)，保留提供的矢量内容。PNG 用于应用窗口、工具栏和 Linux 桌面；ICO 用于 Windows EXE 和 MSI；ICNS 用于 macOS 应用和 DMG。
+图标源为 [`assets/icons/xiterm.svg`](assets/icons/xiterm.svg)，保留提供的矢量内容。PNG 用于应用窗口、顶部标签栏和 Linux 桌面；ICO 用于 Windows EXE 和 MSI；ICNS 用于 macOS 应用和 DMG。
 
 生成文件已保存在仓库，正常构建无需图像工具。修改 SVG 后重新生成：
 
@@ -210,3 +210,5 @@ NODE_PATH=/tmp/xiterm-icon-tools/node_modules node scripts/render-icons.cjs
 # 需要 Python Pillow
 python3 scripts/pack-icons.py
 ```
+
+界面操作图标采用内嵌的 Tabler SVG，通过 Onix SVG 解码器按三倍分辨率栅格化并绘制；不使用文本字形模拟按钮图标。SVG 源文件及 MIT 许可位于 `assets/icons/ui/`，打包时附带许可。

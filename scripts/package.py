@@ -38,6 +38,7 @@ def copy_notices(target):
     shutil.copy2(ROOT / "README.md", target / "README.md")
     for source in (ROOT / "assets/fonts").glob("*.txt"):
         shutil.copy2(source, target / source.name)
+    shutil.copy2(ROOT / "assets/icons/ui/LICENSE.txt", target / "TABLER-ICONS-LICENSE.txt")
     # Include every dependency's own LICENSE/NOTICE files in the distribution.
     modules = subprocess.check_output(["go", "list", "-m", "-json", "all"], cwd=ROOT, text=True)
     decoder, offset = json.JSONDecoder(), 0
