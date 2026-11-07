@@ -1,12 +1,12 @@
 #import <Cocoa/Cocoa.h>
 #include <stdint.h>
 
-static id keyMonitor;
-static NSMutableArray<NSArray<NSNumber *> *> *keyModifiers;
+static id xitermKeyMonitor;
+static NSMutableArray<NSArray<NSNumber *> *> *xitermModifierSnapshots;
 
 // Match keys forwarded by the pinned Onix macOS backend. Unknown multimedia
 // keys must not add a snapshot without a corresponding OnKeydown callback.
-static int canonicalKey(NSEvent *event) {
+static int xitermCanonicalKey(NSEvent *event) {
     // Keep this mapping aligned with window/macos_native.m in the pinned
     // Onix dependency so each Go key callback consumes its own flag snapshot.
     switch (event.keyCode) {
@@ -50,29 +50,29 @@ static int canonicalKey(NSEvent *event) {
 
 void xiterm_install_key_modifiers(uintptr_t handle) {
     NSWindow *window = (NSWindow *)handle;
-    keyModifiers = [[NSMutableArray alloc] init];
+    xitermModifierSnapshots = [[NSMutableArray alloc] init];
     // Capture flags while NSEvent is being dispatched. Querying global flags
     // later would lose fast shortcuts already released in the same event batch.
-    keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
-        int key = canonicalKey(event);
+    xitermKeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+        int key = xitermCanonicalKey(event);
         if (event.window == window && key != 0) {
             NSEventModifierFlags f = event.modifierFlags;
             int flags = ((f & NSEventModifierFlagShift) ? 1 : 0)
                       | ((f & NSEventModifierFlagControl) ? 2 : 0)
                       | ((f & NSEventModifierFlagOption) ? 4 : 0)
                       | ((f & NSEventModifierFlagCommand) ? 8 : 0);
-            [keyModifiers addObject:@[@(key), @(flags)]];
+            [xitermModifierSnapshots addObject:@[@(key), @(flags)]];
         }
         return event;
     }];
 }
 
 int xiterm_next_key_modifiers(int key) {
-    while (keyModifiers.count > 0) {
-        NSArray<NSNumber *> *snapshot = keyModifiers[0];
+    while (xitermModifierSnapshots.count > 0) {
+        NSArray<NSNumber *> *snapshot = xitermModifierSnapshots[0];
         int code = snapshot[0].intValue;
         int flags = snapshot[1].intValue;
-        [keyModifiers removeObjectAtIndex:0];
+        [xitermModifierSnapshots removeObjectAtIndex:0];
         // Cocoa may consume a key equivalent without forwarding keyDown.
         if (code == key) return flags;
     }
@@ -80,8 +80,8 @@ int xiterm_next_key_modifiers(int key) {
 }
 
 void xiterm_remove_key_modifiers(void) {
-    if (keyMonitor != nil) [NSEvent removeMonitor:keyMonitor];
-    keyMonitor = nil;
-    [keyModifiers release];
-    keyModifiers = nil;
+    if (xitermKeyMonitor != nil) [NSEvent removeMonitor:xitermKeyMonitor];
+    xitermKeyMonitor = nil;
+    [xitermModifierSnapshots release];
+    xitermModifierSnapshots = nil;
 }
