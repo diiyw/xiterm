@@ -30,7 +30,15 @@ make build
 ./bin/xiterm -directory "$PWD"
 ```
 
-Linux / macOS 默认使用 `$SHELL` 和登录 shell 参数 `-l`；未设置 `$SHELL` 时使用 `/bin/sh`。默认内嵌 **JetBrains Mono NL Nerd Font Mono v3.5.1** 的常规和粗体版本，支持 Powerline、文件类型、GitHub、终端、Material Design 等图标字形，无须在系统安装字体。使用自定义 `font_path` 时，私有区图标仍回退到内置 Nerd Font，其他缺失字符由 Onix 尝试系统字体回退。
+Linux / macOS 默认使用 `$SHELL` 和登录 shell 参数 `-l`；未设置 `$SHELL` 时使用 `/bin/sh`。默认内嵌 **JetBrains Mono NL Nerd Font Mono v3.5.1** 的常规和粗体版本，支持 Powerline、文件类型、GitHub、终端、Material Design 等图标字形，无须在系统安装字体。缺失的中文及其他字形使用系统已安装字体回退，中文按双列宽度显示，不额外捆绑中文字体。三个桌面平台的 UI 字体遵循同一规则：读取各自当前的系统界面字体，统一使用系统字形回退、文字测量和缩放逻辑。使用自定义 `font_path` 时，私有区图标仍回退到内置 Nerd Font。
+
+| 平台 | UI 字体来源 |
+| --- | --- |
+| Windows | 系统当前 `NONCLIENTMETRICS` 消息字体 |
+| macOS | CoreText 当前系统 UI 字体及对应字体集合索引 |
+| Linux | 当前桌面字体设置，经 Fontconfig 解析；未提供桌面设置时使用系统默认字体 |
+
+三端均使用已安装的系统中文字体，不随应用打包中文字体。系统字体加载、中文常规 / 粗体回退和 UI 宽度计算由三平台 CI 检查。
 
 ## 已实现
 
@@ -65,11 +73,15 @@ Linux 使用 `Ctrl+Shift`，macOS 使用 `Cmd` 作为应用快捷键前缀。`Ct
 | 切换标签页 | Ctrl+Tab / Ctrl+Shift+Tab | 同左 |
 | 按序号选择标签页 | Alt+1…9 | 同左 |
 | 切换面板 | Alt+Left / Right | 同左 |
-| 滚动历史 | Shift+PageUp / PageDown、滚轮 | 同左 |
+| 滚动历史 | PageUp / PageDown（也支持 Shift）、滚轮 | 同左 |
+| 历史首尾 | Shift+Home / End | 同左 |
+| 命令行首尾 | Home / End | 同左 |
 | 全屏 | F11 | F11 |
 | 帮助 | F1 | F1 |
 
 终端中的 `↑` / `↓` 传给 shell，用于预览、选择命令历史；`Enter` 才执行选中的命令，`↓` 可返回尚未提交的输入（具体行为由 shell 决定）。搜索时输入查询，`↓` / `↑` 或 `Enter` / `Shift+Enter` 选择下一个 / 上一个匹配，`Esc` 返回终端。右键菜单提供新标签页、分屏、复制粘贴、搜索、Profiles、设置及帮助，支持上下键选择、`Enter` 确认、`Esc` 关闭。TUI 开启鼠标捕获时，按住 `Shift` 可拖动选择文本。
+
+普通屏幕中，`PageUp` / `PageDown`（或加 `Shift`）翻阅历史，`Shift+Home` / `Shift+End` 跳到最早历史 / 当前输出；`Home` / `End` 交给 shell 编辑命令行。使用备用屏幕的全屏程序会收到这些导航键及其修饰键，按程序自己的规则移动或翻页。
 
 ## 配置
 
@@ -138,7 +150,7 @@ make smoke
 make native-test
 ```
 
-完整检查向真实 X11 窗口发送键盘和鼠标事件，验证 `cd` 文本输入、上下键历史选择及草稿恢复、窗口放大/缩小时真实 PTY 行列变化、右键菜单、独立标签页、嵌套分屏、设置保存、`exit` 关闭及最后标签退出，截图输出至 `artifacts/native-smoke.png` 和 `artifacts/context-menu.png`。没有启动 Onix 项目编辑器。
+完整检查向真实 X11 窗口发送键盘和鼠标事件，验证 `cd` 文本输入、上下键历史选择及草稿恢复、Home/End 命令行编辑、全屏程序导航键序列、历史翻页和首尾跳转、中文常规和粗体的双列绘制、窗口放大/缩小时真实 PTY 行列变化、右键菜单、独立标签页、嵌套分屏、设置保存、`exit` 关闭及最后标签退出，截图输出至 `artifacts/native-smoke.png`、`artifacts/context-menu.png` 和 `artifacts/chinese-rendering.png`。没有启动 Onix 项目编辑器。
 
 ## 结构与后续工作
 
@@ -153,7 +165,7 @@ make native-test
 
 当前限制：历史按终端行存储，缩放不重排旧行；选择和搜索按物理行工作。尚未实现 IME 预编辑文字的绘制，以及复杂 emoji / ZWJ 字形塑形、完整终端协议一致性测试。关闭活动面板会结束其会话，没有未结束任务确认流程。
 
-Onix 版本固定在 `e5ec5303825c`，可独立通过 Go modules 构建，无需本机 Onix checkout。PTY 使用 `creack/pty` / `charmbracelet/x/conpty`，VT 解析使用 `charmbracelet/x/vt`；依赖版本记录在 `go.mod` / `go.sum`。Nerd Font 许可见 `assets/fonts/LICENSE.txt` 和 `assets/fonts/NERD-FONTS-LICENSE.txt`。
+Onix 版本固定为 [`v0.1.2`](https://github.com/onix-engine/onix/releases/tag/v0.1.2)（`9e88d1c2091e`），可独立通过 Go modules 构建，无需本机 Onix checkout。PTY 使用 `creack/pty` / `charmbracelet/x/conpty`，VT 解析使用 `charmbracelet/x/vt`；依赖版本记录在 `go.mod` / `go.sum`。Nerd Font 许可见 `assets/fonts/LICENSE.txt` 和 `assets/fonts/NERD-FONTS-LICENSE.txt`。
 
 
 ## Tag 自动打包

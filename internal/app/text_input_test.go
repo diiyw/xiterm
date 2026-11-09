@@ -103,3 +103,54 @@ func TestTextInputCaretFollowsSearch(t *testing.T) {
 		t.Fatalf("long query caret = %v, want 530", got)
 	}
 }
+
+func TestCompositionAnchorSurvivesOutputAndResize(t *testing.T) {
+	term := vt.NewEmulator(80, 40)
+	defer term.Close()
+	pane := &workspace.Pane{Session: &terminal.Session{Term: term}, Bounds: workspace.Rect{Y: tabsH}}
+	a := &App{paint: painter{cellW: 9, lineH: 22}, tabs: []*workspace.Tab{{Root: workspace.Leaf(pane), Active: pane}}}
+	fmt.Fprint(term, "\x1b[38;18H")
+	before := a.textInputConfig()
+	a.textComposition(input.TextComposition{Text: "shi", Active: true})
+	fmt.Fprint(term, "\x1b[8;70Hbackground output")
+	if got := a.textInputConfig(); got.Caret != before.Caret || got.Revision != before.Revision {
+		t.Fatalf("background output moved composition: %+v", got)
+	}
+	// Geometry still follows zoom/pane movement while the cell stays anchored.
+	pane.Bounds.X = 300
+	a.paint.cellW = 12
+	if got := a.textInputConfig(); got.Caret.X != 516 || got.Revision != before.Revision {
+		t.Fatalf("composition did not follow geometry: %+v", got)
+	}
+	a.textComposition(input.TextComposition{})
+	if got := a.textInputConfig(); got.Caret == before.Caret || got.Revision != before.Revision {
+		t.Fatalf("composition did not release anchor: %+v", got)
+	}
+}
+
+func TestChangingInputTargetRestartsComposition(t *testing.T) {
+	term := vt.NewEmulator(80, 24)
+	defer term.Close()
+	left := &workspace.Pane{Session: &terminal.Session{Term: term}}
+	right := &workspace.Pane{Session: &terminal.Session{Term: term}, Bounds: workspace.Rect{X: 500}}
+	root := workspace.Leaf(left)
+	root.Split(left, right, workspace.Columns)
+	tab := &workspace.Tab{Root: root, Active: left}
+	a := &App{paint: painter{cellW: 9, lineH: 22}, tabs: []*workspace.Tab{tab}}
+	first := a.textInputConfig()
+	a.textComposition(input.TextComposition{Active: true})
+	tab.Active = right
+	next := a.textInputConfig()
+	if next.Revision == first.Revision || a.textInput.composing || next.Caret.X != 512 {
+		t.Fatalf("pane switch kept old composition: %+v", next)
+	}
+	a.menu = true
+	disabled := a.textInputConfig()
+	if disabled.Active || disabled.Revision == next.Revision {
+		t.Fatalf("menu did not end text input: %+v", disabled)
+	}
+	a.menu = false
+	if resumed := a.textInputConfig(); !resumed.Active || resumed.Revision == disabled.Revision {
+		t.Fatalf("dismissed menu did not restart text input: %+v", resumed)
+	}
+}

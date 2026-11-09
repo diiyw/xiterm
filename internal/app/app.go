@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,10 +37,12 @@ type button struct {
 	active bool
 }
 type App struct {
+	textInput      textInputState
 	logo           *graphics.Texture
 	icons          map[string]*graphics.Texture
 	keyModifiers   func(input.KeyCode) (uv.KeyMod, bool)
 	nerdFont       *text.Font
+	uiFont         *text.Font
 	mousePane      *workspace.Pane
 	dragSplit      *workspace.Node
 	lastTitle      string
@@ -121,10 +124,14 @@ func Run(opts Options) error {
 		return err
 	}
 	defer a.font.Dispose()
-	if a.boldFont, err = text.LoadFont(bold); err != nil {
-		return err
+	if a.cfg.FontPath != "" {
+		a.boldFont = a.font
+	} else {
+		if a.boldFont, err = text.LoadFont(bold); err != nil {
+			return err
+		}
+		defer a.boldFont.Dispose()
 	}
-	defer a.boldFont.Dispose()
 	if a.cfg.FontPath != "" {
 		a.nerdFont, err = text.LoadFont(assets.Regular)
 		if err != nil {
@@ -132,7 +139,12 @@ func Run(opts Options) error {
 		}
 		defer a.nerdFont.Dispose()
 	}
+	if a.uiFont, err = loadSystemUIFont(); err != nil {
+		return fmt.Errorf("load system UI font: %w", err)
+	}
+	defer a.uiFont.Dispose()
 	a.setFontSize(a.cfg.FontSize)
+	defer a.paint.disposeGlyphCaches()
 	profile := a.cfg.Profile()
 	if opts.Directory != "" {
 		profile.Directory = opts.Directory
@@ -147,12 +159,7 @@ func Run(opts Options) error {
 	if opts.SmokeDuration > 0 {
 		a.smokeDeadline = time.Now().Add(opts.SmokeDuration)
 	}
-	a.win.SetIdleDeadline(func() (time.Time, bool) {
-		if a.dirty || a.win.FrameRequested() {
-			return time.Time{}, false
-		}
-		return a.blinkAt, true
-	})
+	a.win.SetIdleDeadline(a.idleDeadline)
 	return a.win.LoopGame(func() (bool, error) {
 		if !a.smokeDeadline.IsZero() && time.Now().After(a.smokeDeadline) {
 			a.win.RequestClose()
@@ -161,11 +168,7 @@ func Run(opts Options) error {
 		if a.win.TakeFrameRequest() {
 			a.dirty = true
 		}
-		if time.Now().After(a.blinkAt) {
-			a.blink = !a.blink
-			a.blinkAt = time.Now().Add(550 * time.Millisecond)
-			a.dirty = true
-		}
+		a.advanceTimers(time.Now())
 		w, h := a.win.GetViewport()
 		if a.width != float32(w) || a.height != float32(h) {
 			a.width = float32(w)
@@ -186,13 +189,73 @@ func Run(opts Options) error {
 	})
 }
 
+// Only animate while the cursor can actually be seen. A zero idle deadline
+// lets the native loop sleep until input or PTY output arrives.
+func (a *App) cursorCanBlink() bool {
+	p := a.pane()
+	return p != nil && !a.search && !a.menu && a.overlay == "" &&
+		p.Scroll == 0 && !p.Session.Exited && !p.Session.Term.CursorHidden()
+}
+
+func (a *App) idleDeadline() (time.Time, bool) {
+	if a.dirty || a.win.FrameRequested() {
+		return time.Time{}, false
+	}
+	for _, t := range a.tabs {
+		pending := false
+		t.Root.Visit(func(p *workspace.Pane) { pending = pending || p.Session.PendingOutput() })
+		if pending {
+			return time.Time{}, false
+		}
+	}
+	var deadline time.Time
+	if a.cursorCanBlink() {
+		deadline = a.blinkAt
+	}
+	for _, next := range []time.Time{a.noticeUntil, a.smokeDeadline} {
+		if !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
+			deadline = next
+		}
+	}
+	return deadline, true
+}
+
+func (a *App) advanceTimers(now time.Time) {
+	if a.cursorCanBlink() {
+		if !now.Before(a.blinkAt) {
+			a.blink = !a.blink
+			a.blinkAt = now.Add(550 * time.Millisecond)
+			a.dirty = true
+		}
+	} else {
+		a.blink = false
+		a.blinkAt = time.Time{}
+	}
+	if !a.noticeUntil.IsZero() && !now.Before(a.noticeUntil) {
+		a.noticeUntil = time.Time{}
+		a.dirty = true
+	}
+}
+
 func (a *App) setFontSize(size int) {
 	a.cfg.FontSize = max(10, min(36, size))
+	if a.paint.regular != nil && a.paint.size == float32(a.cfg.FontSize) {
+		return
+	}
+	a.paint.disposeGlyphCaches()
 	a.paint.size = float32(a.cfg.FontSize)
-	a.paint.regular = a.font.GlyphCache(float64(a.cfg.FontSize), 72)
-	a.paint.bold = a.boldFont.GlyphCache(float64(a.cfg.FontSize), 72)
+	// Standalone caches own their atlases, so old sizes are released on zoom
+	// instead of accumulating in Font's cache for the process lifetime.
+	a.paint.regular = text.NewGlyphCache(a.font, float64(a.cfg.FontSize), 72)
+	a.paint.bold = a.paint.regular
+	if a.boldFont != a.font {
+		a.paint.bold = text.NewGlyphCache(a.boldFont, float64(a.cfg.FontSize), 72)
+	}
 	if a.nerdFont != nil {
-		a.paint.nerd = a.nerdFont.GlyphCache(float64(a.cfg.FontSize), 72)
+		a.paint.nerd = text.NewGlyphCache(a.nerdFont, float64(a.cfg.FontSize), 72)
+	}
+	if a.uiFont != nil {
+		a.paint.ui = text.NewGlyphCache(a.uiFont, float64(a.cfg.FontSize), 72)
 	}
 	a.paint.cellW = a.paint.regular.GlyphMetrics('M').Advance
 	a.paint.lineH = float32(a.cfg.FontSize) + 7
@@ -263,7 +326,7 @@ func (a *App) closePaneAt(index int, p *workspace.Pane) {
 	p.Session.Close()
 	t.Root = t.Root.Remove(p)
 	if t.Root == nil {
-		a.tabs = append(a.tabs[:index], a.tabs[index+1:]...)
+		a.tabs = slices.Delete(a.tabs, index, index+1)
 		if len(a.tabs) == 0 {
 			a.win.RequestClose()
 			return
@@ -286,7 +349,7 @@ func (a *App) closeTab(index int) {
 		return
 	}
 	a.tabs[index].Root.Visit(func(p *workspace.Pane) { p.Session.Close() })
-	a.tabs = append(a.tabs[:index], a.tabs[index+1:]...)
+	a.tabs = slices.Delete(a.tabs, index, index+1)
 	if len(a.tabs) == 0 {
 		a.win.RequestClose()
 		return
@@ -431,6 +494,8 @@ func (a *App) toggleSearch() {
 	a.overlay = ""
 	if a.search {
 		a.updateSearch(true)
+	} else {
+		a.resetSearch()
 	}
 	a.dirty = true
 }

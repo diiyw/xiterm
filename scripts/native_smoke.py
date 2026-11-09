@@ -148,6 +148,76 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         type_text(f"printf draft > {draft_marker}", submit=False)
         press(0xFF52); press(0xFF54); press(0xFF0D)
         wait_for(draft_marker.exists, "Down did not restore the unsubmitted command")
+        # Home/End must edit the draft in Readline's application cursor mode.
+        navigation_marker = temp / "home-end-ok"
+        type_text("printf home", submit=False)
+        press(0xFF50)  # Home
+        type_text("true; ", submit=False)
+        press(0xFF57)  # End
+        type_text(f"end > {navigation_marker}")
+        wait_for(navigation_marker.exists, "Home/End did not edit the command")
+        assert navigation_marker.read_text() == "homeend"
+        # A full-screen raw application receives navigation instead of local
+        # history scrolling. Check the actual PTY bytes, including DECCKM.
+        recorder = temp / "navigation.py"
+        raw_ready, raw_result = temp / "raw-ready", temp / "raw-result"
+        recorder.write_text(
+            "import os, pathlib, termios, tty\n"
+            "old = termios.tcgetattr(0)\n"
+            "try:\n"
+            "    tty.setraw(0)\n"
+            "    os.write(1, b'\\x1b[?1049h\\x1b[?1h')\n"
+            f"    pathlib.Path({str(raw_ready)!r}).touch()\n"
+            "    data = b''\n"
+            "    while len(data) < 14:\n"
+            "        data += os.read(0, 14 - len(data))\n"
+            f"    pathlib.Path({str(raw_result)!r}).write_bytes(data)\n"
+            "finally:\n"
+            "    os.write(1, b'\\x1b[?1l\\x1b[?1049l')\n"
+            "    termios.tcsetattr(0, termios.TCSANOW, old)\n"
+        )
+        type_text(f"python3 {recorder}")
+        wait_for(raw_ready.exists, "Raw navigation recorder did not start")
+        for sym in (0xFF50, 0xFF57, 0xFF55, 0xFF56):
+            press(sym)
+        wait_for(raw_result.exists, "Full-screen navigation did not reach the PTY")
+        assert raw_result.read_bytes() == b"\x1bOH\x1bOF\x1b[5~\x1b[6~", raw_result.read_bytes()
+        time.sleep(0.2)
+        # Wide Chinese glyphs must retain ink in both terminal columns. Use
+        # escapes for input so this check does not need an installed IME.
+        chinese = "".join(r"\u" + f"{ord(char):04x}" for char in "腾讯应用宝")
+        type_text(r"printf '\033[2J\033[H\033[33m" + chinese + r"\033[0m\n\033[1;33m" + chinese + r"\033[0m\n'")
+        time.sleep(0.25)
+        cjk_image = ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).convert("RGB")
+        cjk_image.save(ROOT / "artifacts/chinese-rendering.png")
+        for row in range(2):
+            for col in range(5):
+                glyph = cjk_image.crop((12 + col * 18, 50 + row * 22, 30 + col * 18, 72 + row * 22))
+                ink_columns = [x for x in range(18) if any(
+                    glyph.getpixel((x, y))[0] > 130 and glyph.getpixel((x, y))[1] > 100
+                    for y in range(22))]
+                assert ink_columns and max(ink_columns) - min(ink_columns) >= 10, (row, col, ink_columns)
+        # Main-screen PageUp/PageDown alter the visible history; Shift+End
+        # restores the exact same live text (exclude the blinking cursor).
+        paging_ready = temp / "paging-ready"
+        type_text(r"for i in {1..80}; do printf 'history %03d\n' $i; done; touch " + str(paging_ready))
+        wait_for(paging_ready.exists, "History output did not complete")
+        time.sleep(0.25)
+        def history_pixels():
+            return ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).crop((12, 50, 700, 490)).tobytes()
+        live_pixels = history_pixels()
+        press(0xFF55)
+        assert history_pixels() != live_pixels, "PgUp did not move through history"
+        press(0xFF56)
+        assert history_pixels() == live_pixels, "PgDn did not restore the live screen"
+        key(0xFFE1)
+        press(0xFF50)  # Shift+Home
+        key(0xFFE1, False)
+        assert history_pixels() != live_pixels, "Shift+Home did not reach history"
+        key(0xFFE1)
+        press(0xFF57)  # Shift+End
+        key(0xFFE1, False)
+        assert history_pixels() == live_pixels, "Shift+End did not return to live output"
         # stty reads the actual PTY dimensions, not the rendered scene size.
         def terminal_size(name, width, height):
             x11.XResizeWindow(display, windows[-1], width, height)
@@ -163,6 +233,26 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         assert grown[0] > base[0] and grown[1] > base[1], (base, grown)
         assert shrunk[0] < base[0] and shrunk[1] < base[1], (base, shrunk)
         terminal_size("restored-size", 1200, 780)
+        # Repeated zoom must release old glyph atlases without breaking text
+        # rendering or leaving the PTY at an obsolete font size.
+        def open_preferences():
+            click(350, 100, 3)
+            for _ in range(8):
+                press(0xFF54)
+            press(0xFF0D)
+        open_preferences()
+        for _ in range(3):
+            click(879, 211)  # Preferences font size +.
+            click(829, 211)  # Preferences font size -.
+        click(879, 211)
+        press(0xFF1B)
+        zoomed = terminal_size("zoomed-size", 1200, 780)
+        open_preferences()
+        click(829, 211)
+        press(0xFF1B)
+        reset = terminal_size("font-reset-size", 1200, 780)
+        assert zoomed[0] < reset[0] and zoomed[1] < reset[1], (zoomed, reset)
+        assert reset == grown, (reset, grown)
         # Menu opens on right click and supports both keyboard and mouse.
         click(350, 100, 3)
         press(0xFF54); press(0xFF0D)
@@ -207,7 +297,7 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         process.wait(timeout=8)
         assert process.returncode == 0, process.stderr.read().decode()
         wait_for(lambda: all(not Path(f"/proc/{pid}").exists() for pid in child_pids), "Shell processes survived window close")
-        print(f"PASS: cd input, Up/Down history/drafts, real PTY grow/shrink {base}/{grown}/{shrunk}, SVG context menu, nested splits, tabs, search, save, exit/last-tab cleanup; screenshot {output}")
+        print(f"PASS: cd input, Up/Down history/drafts, Home/End editing, full-screen navigation, Chinese glyphs, history paging/endpoints, real PTY grow/shrink {base}/{grown}/{shrunk}, repeated font zoom/reset, SVG context menu, nested splits, tabs, search, save, exit/last-tab cleanup; screenshot {output}")
     finally:
         if process.poll() is None:
             ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(ROOT / "artifacts/native-failure.png")

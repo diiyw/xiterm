@@ -4,11 +4,11 @@ import (
 	"image/color"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/diiyw/xiterm/assets"
+	"github.com/diiyw/xiterm/internal/workspace"
 	"github.com/onix-engine/onix/graphics"
 	"github.com/onix-engine/onix/render"
 	"github.com/onix-engine/onix/text"
-	"github.com/diiyw/xiterm/assets"
-	"github.com/diiyw/xiterm/internal/workspace"
 )
 
 var (
@@ -37,8 +37,20 @@ type painter struct {
 	canvas        *graphics.Canvas2D
 	regular, bold *text.GlyphCache
 	nerd          *text.GlyphCache
+	ui            *text.GlyphCache
 	cellW, lineH  float32
 	size          float32
+}
+
+func (p *painter) disposeGlyphCaches() {
+	if p.bold != p.regular {
+		_ = p.bold.Dispose()
+	}
+	_ = p.regular.Dispose()
+	_ = p.nerd.Dispose()
+	_ = p.ui.Dispose()
+	p.regular, p.bold, p.nerd = nil, nil, nil
+	p.ui = nil
 }
 
 func (p *painter) rect(r workspace.Rect, c graphics.ColorRGBA) {
@@ -48,15 +60,47 @@ func (p *painter) rect(r workspace.Rect, c graphics.ColorRGBA) {
 	p.canvas.DrawShapeAffine([6]float32{r.W, 0, r.X, 0, r.H, r.Y}, [6]float32{1, 0, 0, 0, 1, 0}, r.W, r.H, render.ShapeRoundedRect, c, graphics.ColorRGBA{}, 0, 0, 1)
 }
 func (p *painter) label(value string, x, y float32, c graphics.ColorRGBA, bold bool) {
-	cache := p.regular
-	if bold {
-		cache = p.bold
-	}
+	cache := p.labelCache()
 	for _, r := range value {
-		actual, g := p.glyphFor(cache, r)
-		p.glyph(actual, g, x, y+p.size, c)
+		g := cache.Glyph(r)
+		p.glyph(cache, g, x, y+p.size, c)
+		if bold {
+			p.glyph(cache, g, x+0.35, y+p.size, c)
+		}
 		x += g.Advance
 	}
+}
+
+func (p *painter) labelCache() *text.GlyphCache {
+	if p.ui != nil {
+		return p.ui
+	}
+	return p.regular
+}
+
+func (p *painter) labelWidth(value string) float32 {
+	var width float32
+	for _, r := range value {
+		width += p.labelCache().GlyphMetrics(r).Advance
+	}
+	return width
+}
+
+func (p *painter) shortenLabel(value string, width float32) string {
+	if p.labelWidth(value) <= width {
+		return value
+	}
+	if width < p.labelWidth("…") {
+		return ""
+	}
+	width -= p.labelWidth("…")
+	for i, r := range value {
+		width -= p.labelWidth(string(r))
+		if width < 0 {
+			return value[:i] + "…"
+		}
+	}
+	return value
 }
 func (p *painter) glyph(cache *text.GlyphCache, g text.Glyph, x, baseline float32, c graphics.ColorRGBA) {
 	if !g.Visible() {
@@ -90,6 +134,9 @@ func (p *painter) cell(c *uv.Cell, x, y float32, fg, bg graphics.ColorRGBA) {
 		}
 		// The VT owns cell widths; combining code points share the cell origin.
 		for _, r := range c.Content {
+			if r == ' ' {
+				continue
+			}
 			actual, g := p.glyphFor(cache, r)
 			p.glyph(actual, g, x, y+p.size, fg)
 		}

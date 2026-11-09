@@ -66,7 +66,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libx11-dev libxext-dev libxrender-dev libxi-dev libwayland-dev libxkbcommon-dev libgl-dev xvfb libgl1-mesa-dri libglx-mesa0
+          sudo apt-get install -y build-essential pkg-config libx11-dev libxext-dev libxrender-dev libxi-dev libwayland-dev libxkbcommon-dev libgl-dev xvfb libgl1-mesa-dri libglx-mesa0 fontconfig fonts-noto-cjk
       - name: Install Windows C toolchain
         id: msys2
         if: runner.os == 'Windows'
@@ -104,6 +104,8 @@ jobs:
           go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app
           go vet ./cmd/xiterm ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app
           python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Verify native system UI font discovery
+        run: go test github.com/onix-engine/onix/font -run 'TestWindowsDefaultFontUsesActiveUIFont|TestAppleLoadsCoreTextSystemFontAndCollectionFace|TestLinuxDefaultFontUsesFontconfigSansSerif' -v
       - name: Build native installer
         run: python scripts/package.py --tag "$RELEASE_TAG"
       - name: Test packaged Linux executable

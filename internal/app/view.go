@@ -32,7 +32,7 @@ func (a *App) draw() {
 			title = fmt.Sprintf("%s · %d", title, len(t.Root.Panes()))
 		}
 		p.canvas.PushClipRect(r.X, r.Y, r.W-32, r.H)
-		p.label(shorten(title, max(1, int((r.W-48)/p.cellW))), r.X+14, 12, foreground, false)
+		p.label(p.shortenLabel(title, max(0, r.W-48)), r.X+14, 12, foreground, false)
 		p.canvas.PopClipRect()
 		a.buttons = append(a.buttons, button{rect: r, action: func() { a.switchTab(index) }})
 		a.addIconButton("close", workspace.Rect{X: r.X + r.W - 32, Y: 5, W: 28, H: 32}, func() { a.closeTab(index) })
@@ -100,7 +100,7 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 		}
 		p.rect(workspace.Rect{X: r.X, Y: r.Y, W: r.W, H: headerH}, head)
 		title := filepath.Base(s.Profile.Shell) + "  ·  " + s.Profile.Name
-		p.label(shorten(title, max(1, int((r.W-120)/p.cellW))), r.X+12, r.Y+4, muted, false)
+		p.label(p.shortenLabel(title, max(0, r.W-120)), r.X+12, r.Y+4, muted, false)
 		if r.W > 230 {
 			p.label(fmt.Sprintf("%d × %d", s.Term.Width(), s.Term.Height()), r.X+r.W-100, r.Y+4, muted, false)
 		}
@@ -116,11 +116,19 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 		}
 	}
 	x0, y0 := r.X+12, r.Y+headerH+8
-	// Paint backgrounds in a separate pass so glyphs can share GPU batches.
+	defaultBG := fromColor(s.Term.BackgroundColor(), background)
+	defaultFG := fromColor(s.Term.ForegroundColor(), foreground)
+	// Adjacent cells usually share a background. Submit one rectangle per run
+	// rather than thousands of identical cell rectangles on every cursor blink.
 	for y := 0; y < rows; y++ {
+		runStart := 0
+		runColor := defaultBG
+		flush := func(end int) {
+			p.rect(workspace.Rect{X: x0 + float32(runStart)*p.cellW, Y: y0 + float32(y)*p.lineH, W: float32(end-runStart) * p.cellW, H: p.lineH}, runColor)
+		}
 		for x := 0; x < cols; x++ {
 			c := s.Cell(x, start+y)
-			bg := fromColor(s.Term.BackgroundColor(), background)
+			bg := defaultBG
 			if c != nil {
 				bg = fromColor(s.ResolveColor(c.Style.Bg), bg)
 				if c.Style.Attrs&uv.AttrReverse != 0 {
@@ -138,8 +146,13 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 					}
 				}
 			}
-			p.rect(workspace.Rect{X: x0 + float32(x)*p.cellW, Y: y0 + float32(y)*p.lineH, W: p.cellW, H: p.lineH}, bg)
+			if x > 0 && bg != runColor {
+				flush(x)
+				runStart = x
+			}
+			runColor = bg
 		}
+		flush(cols)
 	}
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
@@ -147,18 +160,18 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 			if c == nil {
 				continue
 			}
-			fg := fromColor(s.ResolveColor(c.Style.Fg), fromColor(s.Term.ForegroundColor(), foreground))
+			fg := fromColor(s.ResolveColor(c.Style.Fg), defaultFG)
 			bg := fromColor(s.ResolveColor(c.Style.Bg), background)
 			p.cell(c, x0+float32(x)*p.cellW, y0+float32(y)*p.lineH, fg, bg)
 		}
 	}
-	if active && !a.search && !a.menu && a.overlay == "" && pane.Scroll == 0 && !s.Term.CursorHidden() && !s.Exited && !a.blink {
+	if active && a.cursorCanBlink() && !a.blink {
 		cursor := s.Term.CursorPosition()
 		p.rect(workspace.Rect{X: x0 + float32(cursor.X)*p.cellW, Y: y0 + float32(cursor.Y)*p.lineH + 2, W: 2, H: p.lineH - 4}, accent)
 	}
 	if pane.Scroll > 0 {
 		label := fmt.Sprintf("%d lines · type to return", pane.Scroll)
-		w := float32(len([]rune(label)))*p.cellW + 20
+		w := p.labelWidth(label) + 20
 		p.rect(workspace.Rect{X: r.X + r.W - w - 10, Y: r.Y + r.H - 30, W: w, H: 25}, surface)
 		p.label(label, r.X+r.W-w, r.Y+r.H-25, accent, false)
 	}
@@ -201,7 +214,7 @@ func (a *App) drawOverlay() {
 		y += 38
 		for _, profile := range a.cfg.Profiles {
 			profile := profile
-			a.addButton(shorten(profile.Name+"  ·  "+filepath.Base(profile.Shell), int((w-70)/p.cellW)), workspace.Rect{X: r.X + 20, Y: y, W: w - 40, H: 40}, true, func() { a.runAction(func() error { return a.newTab(profile) }); a.overlay = "" })
+			a.addButton(p.shortenLabel(profile.Name+"  ·  "+filepath.Base(profile.Shell), w-70), workspace.Rect{X: r.X + 20, Y: y, W: w - 40, H: 40}, true, func() { a.runAction(func() error { return a.newTab(profile) }); a.overlay = "" })
 			y += 46
 		}
 		p.label("Edit profiles in config.json; restart to reload.", r.X+24, r.Y+r.H-40, muted, false)
@@ -216,7 +229,7 @@ func (a *App) drawOverlay() {
 		y += 50
 		p.label("Configuration file", r.X+24, y, muted, false)
 		y += 28
-		p.label(shorten(a.configPath, int((w-48)/p.cellW)), r.X+24, y, foreground, false)
+		p.label(p.shortenLabel(a.configPath, w-48), r.X+24, y, foreground, false)
 		y += 45
 		p.label("Profiles, shell, directory and font are configurable.", r.X+24, y, muted, false)
 		y += 27
@@ -227,11 +240,11 @@ func (a *App) drawOverlay() {
 		if runtime.GOOS == "darwin" {
 			mod = "Cmd+"
 		}
-		rows := [][2]string{{mod + "T", "New tab"}, {mod + "W", "Close pane"}, {mod + "D / E", "Split columns / rows"}, {"Ctrl+Tab / Alt+1…9", "Switch tab"}, {"Alt+Left / Right", "Switch pane"}, {mod + "F", "Find in terminal history"}, {mod + "C / V", "Copy selection / paste"}, {"Shift+PageUp / PageDown", "Scroll history"}, {mod + "+ / −", "Adjust font size"}, {mod + ", / P", "Preferences / profiles"}, {"F11 / Esc", "Fullscreen / dismiss"}}
+		rows := [][2]string{{mod + "T", "New tab"}, {mod + "W", "Close pane"}, {mod + "D / E", "Split columns / rows"}, {"Ctrl+Tab / Alt+1…9", "Switch tab"}, {"Alt+Left / Right", "Switch pane"}, {mod + "F", "Find in terminal history"}, {mod + "C / V", "Copy selection / paste"}, {"PageUp / PageDown", "Scroll history"}, {"Shift+Home / End", "Oldest history / live screen"}, {"Home / End", "Line start / end"}, {mod + "+ / −", "Adjust font size"}, {mod + ", / P", "Preferences / profiles"}, {"F11 / Esc", "Fullscreen / dismiss"}}
 		for _, row := range rows {
 			p.label(row[0], r.X+24, y, accent, false)
 			p.label(row[1], r.X+w*.51, y, foreground, false)
-			y += 31
+			y += 29
 		}
 	}
 }

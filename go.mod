@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/charmbracelet/x/vt v0.1.0
 	github.com/creack/pty v1.1.24
-	github.com/onix-engine/onix v0.0.0-20261107040841-e5ec5303825c
+	github.com/onix-engine/onix v0.1.2
 	golang.org/x/sys v0.49.0
 )
 

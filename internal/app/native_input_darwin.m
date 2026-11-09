@@ -3,6 +3,16 @@
 
 static id xitermKeyMonitor;
 static NSMutableArray<NSArray<NSNumber *> *> *xitermModifierSnapshots;
+static NSMutableArray<id> *xitermInputObservers;
+
+static void xitermInvalidateInputCoordinates(NSWindow *window) {
+    // The caret can be unchanged in the view while its screen coordinates
+    // change after a move, display switch, or returning from another app.
+    NSView *view = window.contentView;
+    if ([view conformsToProtocol:@protocol(NSTextInputClient)]) {
+        [[view inputContext] invalidateCharacterCoordinates];
+    }
+}
 
 // Match keys forwarded by the pinned Onix macOS backend. Unknown multimedia
 // keys must not add a snapshot without a corresponding OnKeydown callback.
@@ -51,11 +61,24 @@ static int xitermCanonicalKey(NSEvent *event) {
 void xiterm_install_key_modifiers(uintptr_t handle) {
     NSWindow *window = (NSWindow *)handle;
     xitermModifierSnapshots = [[NSMutableArray alloc] init];
+    xitermInputObservers = [[NSMutableArray alloc] init];
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    for (NSNotificationName name in @[NSWindowDidMoveNotification,
+                                      NSWindowDidResizeNotification,
+                                      NSWindowDidChangeScreenNotification,
+                                      NSWindowDidChangeBackingPropertiesNotification,
+                                      NSWindowDidBecomeKeyNotification]) {
+        id observer = [center addObserverForName:name object:window queue:nil usingBlock:^(NSNotification *notification) {
+            xitermInvalidateInputCoordinates(window);
+        }];
+        [xitermInputObservers addObject:observer];
+    }
     // Capture flags while NSEvent is being dispatched. Querying global flags
     // later would lose fast shortcuts already released in the same event batch.
     xitermKeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
         int key = xitermCanonicalKey(event);
         if (event.window == window && key != 0) {
+            xitermInvalidateInputCoordinates(window);
             NSEventModifierFlags f = event.modifierFlags;
             int flags = ((f & NSEventModifierFlagShift) ? 1 : 0)
                       | ((f & NSEventModifierFlagControl) ? 2 : 0)
@@ -84,4 +107,9 @@ void xiterm_remove_key_modifiers(void) {
     xitermKeyMonitor = nil;
     [xitermModifierSnapshots release];
     xitermModifierSnapshots = nil;
+    for (id observer in xitermInputObservers) {
+        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    }
+    [xitermInputObservers release];
+    xitermInputObservers = nil;
 }

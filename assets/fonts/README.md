@@ -10,3 +10,7 @@ Source: https://github.com/ryanoasis/nerd-fonts/tree/v3.5.1/patched-fonts/JetBra
 - `NERD-FONTS-LICENSE.txt`: Nerd Fonts and bundled icon license notices.
 
 The fonts are embedded in the executable. Users do not have to install them in the OS.
+
+Missing Chinese and other glyphs use installed system fonts through Onix's
+system fallback. No CJK fonts are bundled. UI labels use the current system UI
+font independently of the terminal font.

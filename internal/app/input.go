@@ -72,6 +72,7 @@ func (a *App) mods() uv.KeyMod {
 }
 
 func (a *App) bindInput() {
+	a.win.OnTextComposition(a.textComposition)
 	a.win.OnKeydown(func(key input.KeyCode) {
 		if a.keyModifiers != nil && key != input.KeyCapsLock && (key < input.KeyLeftShift || key > input.KeyRightSuper) {
 			if mods, ok := a.keyModifiers(key); ok {
@@ -234,6 +235,7 @@ func (a *App) keydown(key input.KeyCode) {
 		dismissing := a.search || a.overlay != "" || a.menu
 		a.menu = false
 		a.search = false
+		a.resetSearch()
 		a.overlay = ""
 		a.dragPane = nil
 		a.dragSplit = nil
@@ -316,7 +318,7 @@ func (a *App) keydown(key input.KeyCode) {
 			return
 		case input.KeyK:
 			if p := a.pane(); p != nil {
-				p.Session.Term.ClearScrollback()
+				p.Session.ClearHistory()
 				p.Scroll = 0
 				p.Selected = false
 				p.Session.SendText("\x0c")
@@ -368,12 +370,7 @@ func (a *App) keydown(key input.KeyCode) {
 	if p == nil {
 		return
 	}
-	if a.shift() && (key == input.KeyPageUp || key == input.KeyPageDown) {
-		step := p.Session.Term.Height() - 1
-		if key == input.KeyPageDown {
-			step = -step
-		}
-		p.Scroll = max(0, min(p.Session.HistoryLen(), p.Scroll+step))
+	if a.scrollHistory(p, key) {
 		return
 	}
 	if key == input.KeyEnter || key == input.KeyBackspace {
@@ -401,6 +398,33 @@ func (a *App) keydown(key input.KeyCode) {
 		p.Scroll = 0
 		p.Selected = false
 	}
+}
+
+func (a *App) scrollHistory(p *workspace.Pane, key input.KeyCode) bool {
+	if p.Session.Term.IsAltScreen() || a.ctrl() || a.alt() || a.super() {
+		return false
+	}
+	switch key {
+	case input.KeyPageUp:
+		p.Scroll += max(1, p.Session.Term.Height()-1)
+	case input.KeyPageDown:
+		p.Scroll -= max(1, p.Session.Term.Height()-1)
+	case input.KeyHome:
+		if !a.shift() {
+			return false
+		}
+		p.Scroll = p.Session.HistoryLen()
+	case input.KeyEnd:
+		if !a.shift() {
+			return false
+		}
+		p.Scroll = 0
+	default:
+		return false
+	}
+	p.Scroll = max(0, min(p.Session.HistoryLen(), p.Scroll))
+	p.Selected = false
+	return true
 }
 
 func specialKey(key input.KeyCode) (rune, bool) {
