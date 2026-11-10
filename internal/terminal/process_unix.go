@@ -3,6 +3,7 @@
 package terminal
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/diiyw/xiterm/internal/config"
+	"golang.org/x/sys/unix"
 )
 
 type unixProcess struct {
@@ -26,10 +28,39 @@ func startProcess(profile config.Profile, cols, rows int) (process, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &unixProcess{File: file, cmd: cmd}, nil
+	// pty's setup ioctls call File.Fd, which puts the descriptor in blocking
+	// mode. Reopen a duplicate as a pollable Go file so Close can interrupt a
+	// blocked read/write on both Linux and macOS.
+	fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err == nil {
+		err = unix.SetNonblock(fd, true)
+	}
+	if err != nil {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = file.Close()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("make PTY pollable: %w", err)
+	}
+	pollable := os.NewFile(uintptr(fd), file.Name())
+	_ = file.Close()
+	return &unixProcess{File: pollable, cmd: cmd}, nil
 }
 func (p *unixProcess) Resize(cols, rows int) error {
-	return pty.Setsize(p.File, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	// SyscallConn preserves nonblocking mode; File.Fd would disable it again.
+	raw, err := p.File.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var resizeErr error
+	if err := raw.Control(func(fd uintptr) {
+		resizeErr = unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Col: uint16(cols), Row: uint16(rows)})
+	}); err != nil {
+		return err
+	}
+	return resizeErr
 }
 func (p *unixProcess) Wait() error { err := p.cmd.Wait(); p.exited.Store(true); return err }
 func (p *unixProcess) Close() error {

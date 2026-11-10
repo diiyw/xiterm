@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -11,6 +12,44 @@ import (
 	"github.com/diiyw/xiterm/internal/workspace"
 	"github.com/onix-engine/onix/window"
 )
+
+func TestPollRemovesSimultaneouslyExitedPanesAcrossTabs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires /bin/sh")
+	}
+	a := &App{win: &window.Context{}}
+	for range 3 {
+		tab := &workspace.Tab{}
+		for i := range 3 {
+			s, err := terminal.Start(config.Profile{Name: fmt.Sprint(i), Shell: "/bin/sh", Args: []string{"-c", "exit"}}, 80, 24, 0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(s.Close)
+			pane := &workspace.Pane{Session: s}
+			if tab.Root == nil {
+				tab.Root = workspace.Leaf(pane)
+			} else {
+				tab.Root.Split(tab.Active, pane, workspace.Columns)
+			}
+			tab.Active = pane
+		}
+		a.tabs = append(a.tabs, tab)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for len(a.tabs) > 0 && time.Now().Before(deadline) {
+		a.poll()
+		time.Sleep(time.Millisecond)
+	}
+	if len(a.tabs) != 0 {
+		t.Fatal("poll skipped an exited pane after tab removal")
+	}
+	for _, entry := range a.pollPanes[:cap(a.pollPanes)] {
+		if entry.pane != nil {
+			t.Fatal("poll scratch retained a closed session")
+		}
+	}
+}
 
 func TestIdleScheduling(t *testing.T) {
 	term := vt.NewEmulator(80, 24)
@@ -98,5 +137,33 @@ func TestPendingOutputPreventsIdle(t *testing.T) {
 	}
 	if _, idle := a.idleDeadline(); idle {
 		t.Fatal("queued output was put to sleep without a wake notification")
+	}
+}
+
+func TestPaintPacingSchedulesSleepWithoutBlockingEvents(t *testing.T) {
+	a := &App{win: &window.Context{}, dirty: true}
+	now := time.Now()
+	if !a.frameReady(now) {
+		t.Fatal("initial dirty frame was delayed")
+	}
+	if a.frameReady(now.Add(time.Millisecond)) {
+		t.Fatal("painting exceeded the frame rate limit")
+	}
+	if deadline, idle := a.idleDeadline(); !idle || deadline != a.paintAt {
+		t.Fatal("dirty frame did not schedule a native wait until painting is due")
+	}
+	// Output may request another frame between paints. It must retain the
+	// deadline so frequent wakeups cannot cause unbounded drawing.
+	a.win.RequestFrame()
+	if deadline, idle := a.idleDeadline(); !idle || deadline != a.paintAt {
+		t.Fatal("frame request bypassed paint pacing")
+	}
+	if !a.frameReady(a.paintAt) {
+		t.Fatal("pending frame was not painted at its deadline")
+	}
+	a.dirty = false
+	a.win.TakeFrameRequest()
+	if deadline, idle := a.idleDeadline(); !idle || !deadline.IsZero() {
+		t.Fatal("clean window did not allow indefinite idle")
 	}
 }

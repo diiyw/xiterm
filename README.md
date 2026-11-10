@@ -49,6 +49,7 @@ Linux / macOS 默认使用 `$SHELL` 和登录 shell 参数 `-l`；未设置 `$SH
 - 应用光标模式、备用屏幕、终端查询响应、括号粘贴、基础 TUI 鼠标事件。
 - JSON 配置、多 shell profiles、起始目录、自定义环境变量、自定义字体、设置保存。
 - OSC 0/2 标题、OSC 7 工作目录、文件拖入后生成带引号的路径。
+- Linux / macOS 自动识别 `rz` / `sz` 的 ZMODEM 握手，弹出文件 / 保存目录选择框，支持多文件传输和取消。
 - `exit` 或 shell 结束后自动关闭对应面板，空标签自动移除；最后一个标签关闭后退出程序，清理 shell 进程组。
 - 空闲时等待窗口事件 / PTY 输出，光标闪烁时刷新。
 
@@ -82,6 +83,25 @@ Linux 使用 `Ctrl+Shift`，macOS 使用 `Cmd` 作为应用快捷键前缀。`Ct
 终端中的 `↑` / `↓` 传给 shell，用于预览、选择命令历史；`Enter` 才执行选中的命令，`↓` 可返回尚未提交的输入（具体行为由 shell 决定）。搜索时输入查询，`↓` / `↑` 或 `Enter` / `Shift+Enter` 选择下一个 / 上一个匹配，`Esc` 返回终端。右键菜单提供新标签页、分屏、复制粘贴、搜索、Profiles、设置及帮助，支持上下键选择、`Enter` 确认、`Esc` 关闭。TUI 开启鼠标捕获时，按住 `Shift` 可拖动选择文本。
 
 普通屏幕中，`PageUp` / `PageDown`（或加 `Shift`）翻阅历史，`Shift+Home` / `Shift+End` 跳到最早历史 / 当前输出；`Home` / `End` 交给 shell 编辑命令行。使用备用屏幕的全屏程序会收到这些导航键及其修饰键，按程序自己的规则移动或翻页。
+
+## rz / sz 文件传输
+
+Linux / macOS 本机和远端都需要安装 `lrzsz`，本机的 `rz`、`sz` 必须在启动 XiTerm 时的 `PATH` 中：
+
+```sh
+# Debian / Ubuntu
+sudo apt install lrzsz
+# macOS
+brew install lrzsz
+```
+
+在 XiTerm 中通过 `ssh` 登录远端后：
+
+- 执行 `rz`：自动打开本机文件选择框，可一次选择多个文件，上传至远端当前目录。
+- 执行 `sz file1 file2`：自动选择本机保存目录，下载远端文件；本机同名文件会自动改名，保留已有文件。
+- 文件选择框中取消，或在传输面板按 `Ctrl+C` / `Esc`，会终止传输并恢复终端输入。面板底部显示传输状态，结束或失败时显示通知；连续 30 秒没有协议数据时自动中止。
+
+协议数据直接交给本机 `lrzsz` 进程，不进入终端渲染和历史；接收端启用受限模式，禁止远端指定目录或执行命令。Linux 文件选择框使用桌面的 `xdg-desktop-portal`，需安装相应桌面后端。缺少本机工具或无法打开选择框时会提示并中止远端传输。Windows ConPTY 不能透明传递 ZMODEM 二进制流，当前会提示不支持。
 
 ## 配置
 
@@ -121,6 +141,8 @@ Linux 默认为 `~/.config/xiterm/config.json`（遵循 `XDG_CONFIG_HOME`）；m
 
 将示例的 shell 和目录替换为本机路径；目录和环境变量不会进行 shell 展开。可选的 `font_path` 指向本机 TTF/OTF 字体。修改配置文件后重启生效；设置面板中的字号立即生效，点击保存后持久化。
 
+`scrollback` 是每个面板保留的最大历史行数，设为 `0` 可关闭历史。主屏幕历史采用紧凑的环形存储，共享同一行内的样式。仅绘制当前视口，按需展开可见历史行；滚出视口、返回实时输出或隐藏标签页时释放展开缓存，搜索和复制直接读取紧凑数据。每个面板的紧凑历史数据另有 **32 MiB** 上限；行数或内存达到上限时，优先淘汰最旧的历史，持续输出不会无限累积历史数据。
+
 新标签页 / 分屏继承当前 profile 和已报告的本地目录。shell 未发送 OSC 7 时，目录保持为 profile 的起始目录。zsh 可在 `.zshrc` 中加入：
 
 ```sh
@@ -142,6 +164,15 @@ go test -race ./assets ./internal/config ./internal/terminal ./internal/workspac
 ```
 
 测试覆盖真实 shell 输入和退出、中文字符、PTY 尺寸、ANSI 调色板、终端查询响应、括号粘贴、备用屏幕、搜索与选择、分屏布局、拖动和配置校验。
+
+安装 `lrzsz` 后，测试还会验证真实 ZMODEM 上传 / 下载、二进制内容、中文文件名、多文件、同名文件保留、取消及传输后的 shell 输入；未安装时跳过这些集成用例。
+
+分配回归覆盖空闲轮询、菜单命中、面板查询、Unicode 搜索，以及终端、搜索、菜单和设置等界面的绘制指令生成。稳定布局、查询容量和字形缓存预热后，这些路径可达到 `0 B/op`、`0 allocs/op`；绘制分配测试使用 CPU Canvas，真实窗口另由原生测试验证。`Session.FindInto` 复用调用方的匹配切片，`Find` 仍返回独立持有的结果。PTY 收发复用有界缓冲块，关闭会话时释放；每会话最多保留 66 个 32 KiB 输出块和 66 个 1 KiB 输入块。VT 解析、新历史行、首次字形加载和容量增长仍可能分配。
+
+```sh
+go test ./internal/app -run '^$' -bench 'Benchmark(IdlePoll|MenuHitTest|WarmDraw)' -benchmem
+go test ./internal/terminal -run '^$' -bench 'Benchmark(FindHistoryInto|IOBlockReuse|PackHistoryLine|ContinuousOutput)' -benchmem
+```
 
 原生窗口检查（Linux，需要 `xvfb`；完整检查还需要 `libxtst6` 和 Python Pillow）：
 

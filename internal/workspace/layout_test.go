@@ -1,6 +1,51 @@
 package workspace
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
+
+func TestPaneQueriesReuseAndDividerBoundaries(t *testing.T) {
+	a, b, c, outside := &Pane{}, &Pane{}, &Pane{}, &Pane{}
+	root := Leaf(a)
+	root.Split(a, b, Columns)
+	root.Split(b, c, Rows)
+	root.Layout(Rect{W: 801, H: 601})
+	if root.PaneCount() != 3 || root.FirstPane() != a || !root.Contains(c) || root.Contains(outside) {
+		t.Fatal("pane queries did not follow nested splits")
+	}
+	for _, p := range []*Pane{a, b, c} {
+		if root.PaneAt(p.Bounds.X+10, p.Bounds.Y+10) != p {
+			t.Fatal("pane hit test failed")
+		}
+	}
+	if root.PaneAt(400, 100) != nil || root.PaneAt(500, 300) != nil || root.PaneAt(-1, 100) != nil {
+		t.Fatal("divider or out-of-window hit resolved to a pane")
+	}
+	dst := make([]*Pane, 1, 4)
+	dst[0] = outside
+	if got := root.AppendPanes(dst); !slices.Equal(got, []*Pane{outside, a, b, c}) {
+		t.Fatalf("appended panes = %v", got)
+	}
+	tab := &Tab{Root: root, Active: a}
+	tab.FocusNext(-4)
+	if tab.Active != c {
+		t.Fatal("large backwards focus did not wrap")
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		_ = root.AppendPanes(dst[:0])
+		_ = root.PaneCount()
+		_ = root.Contains(c)
+		_ = root.PaneAt(100, 100)
+		tab.FocusNext(1)
+	}); allocs != 0 {
+		t.Fatalf("warmed pane queries allocated %.0f times", allocs)
+	}
+	var empty *Node
+	if empty.PaneCount() != 0 || empty.FirstPane() != nil || empty.Contains(a) || empty.PaneAt(0, 0) != nil {
+		t.Fatal("empty tree queries returned a pane")
+	}
+}
 
 func TestNestedSplitLayoutAndRemoval(t *testing.T) {
 	a, b, c := &Pane{}, &Pane{}, &Pane{}

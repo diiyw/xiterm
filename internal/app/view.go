@@ -1,15 +1,25 @@
 package app
 
 import (
-	"fmt"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/diiyw/xiterm/internal/terminal"
 	"github.com/diiyw/xiterm/internal/workspace"
+	"github.com/onix-engine/onix/graphics"
 )
+
+var shortcutRows = func() [13][2]string {
+	mod := "Ctrl+Shift+"
+	if runtime.GOOS == "darwin" {
+		mod = "Cmd+"
+	}
+	return [13][2]string{{mod + "T", "New tab"}, {mod + "W", "Close pane"}, {mod + "D / E", "Split columns / rows"}, {"Ctrl+Tab / Alt+1…9", "Switch tab"}, {"Alt+Left / Right", "Switch pane"}, {mod + "F", "Find in terminal history"}, {mod + "C / V", "Copy selection / paste"}, {"PageUp / PageDown", "Scroll history"}, {"Shift+Home / End", "Oldest history / live screen"}, {"Home / End", "Line start / end"}, {mod + "+ / −", "Adjust font size"}, {mod + ", / P", "Preferences / profiles"}, {"F11 / Esc", "Fullscreen / dismiss"}}
+}()
 
 func (a *App) draw() {
 	p := &a.paint
@@ -21,23 +31,28 @@ func (a *App) draw() {
 	const tabStart float32 = 48
 	tabWidth := min(float32(240), max(float32(40), (a.width-tabStart-44)/float32(max(1, len(a.tabs)))))
 	for i, t := range a.tabs {
+		if i != a.active {
+			t.Root.Visit(func(pane *workspace.Pane) { pane.Session.SetViewport(0, 0) })
+		}
 		r := workspace.Rect{X: tabStart + float32(i)*tabWidth, W: tabWidth, H: tabsH}
-		index := i
 		if i == a.active {
 			p.rect(r, background)
 			p.rect(workspace.Rect{X: r.X + 10, Y: r.H - 2, W: r.W - 20, H: 2}, accent)
 		}
 		title := t.Active.Session.Title
-		if len(t.Root.Panes()) > 1 {
-			title = fmt.Sprintf("%s · %d", title, len(t.Root.Panes()))
+		var number [32]byte
+		var suffix string
+		if count := t.Root.PaneCount(); count > 1 {
+			buf := append(number[:0], " · "...)
+			suffix = string(strconv.AppendInt(buf, int64(count), 10))
 		}
 		p.canvas.PushClipRect(r.X, r.Y, r.W-32, r.H)
-		p.label(p.shortenLabel(title, max(0, r.W-48)), r.X+14, 12, foreground, false)
+		p.fittedLabel(max(0, r.W-48), r.X+14, 12, foreground, title, suffix)
 		p.canvas.PopClipRect()
-		a.buttons = append(a.buttons, button{rect: r, action: func() { a.switchTab(index) }})
-		a.addIconButton("close", workspace.Rect{X: r.X + r.W - 32, Y: 5, W: 28, H: 32}, func() { a.closeTab(index) })
+		a.buttons = append(a.buttons, button{rect: r, action: actionSwitchTab, value: i})
+		a.addIconButton("close", workspace.Rect{X: r.X + r.W - 32, Y: 5, W: 28, H: 32}, actionCloseTab, i)
 	}
-	a.addIconButton("plus", workspace.Rect{X: tabStart + float32(len(a.tabs))*tabWidth + 4, Y: 5, W: 32, H: 32}, func() { a.runAction(func() error { return a.newTab(a.currentProfile()) }) })
+	a.addIconButton("plus", workspace.Rect{X: tabStart + float32(len(a.tabs))*tabWidth + 4, Y: 5, W: 32, H: 32}, actionNewTab, 0)
 	if a.search {
 		a.drawSearch()
 	}
@@ -68,13 +83,16 @@ func (a *App) drawSearch() {
 	p.label(query, 70, y+10, foreground, false)
 	p.canvas.PopClipRect()
 	count := "No matches"
+	var number [64]byte
 	if len(a.matches) > 0 {
-		count = fmt.Sprintf("%d / %d", a.matchIndex+1, len(a.matches))
+		buf := strconv.AppendInt(number[:0], int64(a.matchIndex+1), 10)
+		buf = append(buf, " / "...)
+		count = string(strconv.AppendInt(buf, int64(len(a.matches)), 10))
 	}
 	p.label(count, a.width-250, y+10, muted, false)
-	a.addIconButton("up", workspace.Rect{X: a.width - 150, Y: y + 3, W: 55, H: 32}, func() { a.nextMatch(-1) })
-	a.addIconButton("down", workspace.Rect{X: a.width - 94, Y: y + 3, W: 55, H: 32}, func() { a.nextMatch(1) })
-	a.addIconButton("close", workspace.Rect{X: a.width - 38, Y: y + 3, W: 32, H: 32}, a.toggleSearch)
+	a.addIconButton("up", workspace.Rect{X: a.width - 150, Y: y + 3, W: 55, H: 32}, actionNextMatch, -1)
+	a.addIconButton("down", workspace.Rect{X: a.width - 94, Y: y + 3, W: 55, H: 32}, actionNextMatch, 1)
+	a.addIconButton("close", workspace.Rect{X: a.width - 38, Y: y + 3, W: 32, H: 32}, actionSearch, 0)
 }
 func selected(p *workspace.Pane, row, col int) bool {
 	if !p.Selected {
@@ -86,34 +104,70 @@ func selected(p *workspace.Pane, row, col int) bool {
 	}
 	return (row > start.Row || row == start.Row && col >= start.Col) && (row < end.Row || row == end.Row && col <= end.Col)
 }
+
+func cellBackground(s *terminal.Session, col, row int, defaultBG, defaultFG graphics.ColorRGBA) graphics.ColorRGBA {
+	c := s.Cell(col, row)
+	if c != nil && c.Width == 0 {
+		// Wide characters have unstyled continuation cells. Resolve the owning
+		// cell before applying per-column selection and search highlights.
+		for left := col - 1; left >= 0; left-- {
+			previous := s.Cell(left, row)
+			if previous == nil {
+				break
+			}
+			if previous.Width > 0 {
+				if previous.Width > col-left {
+					c = previous
+				}
+				break
+			}
+		}
+	}
+	if c == nil {
+		return defaultBG
+	}
+	if c.Style.Attrs&uv.AttrReverse != 0 {
+		return fromColor(s.ResolveColor(c.Style.Fg), defaultFG)
+	}
+	return fromColor(s.ResolveColor(c.Style.Bg), defaultBG)
+}
+
 func (a *App) drawPane(pane *workspace.Pane, active bool) {
 	p := &a.paint
 	r := pane.Bounds
 	s := pane.Session
 	p.canvas.PushClipRect(r.X, r.Y, r.W, r.H)
 	defer p.canvas.PopClipRect()
+	defer func() {
+		if status := s.TransferStatus(); status != "" {
+			p.rect(workspace.Rect{X: r.X, Y: r.Y + r.H - 30, W: r.W, H: 30}, surface)
+			p.fittedLabel(r.W-24, r.X+12, r.Y+r.H-24, accent, status)
+		}
+	}()
 	headerH := a.paneHeaderHeight(pane)
+	var number [64]byte
 	if headerH > 0 {
 		head := chrome
 		if active {
 			head = surface
 		}
 		p.rect(workspace.Rect{X: r.X, Y: r.Y, W: r.W, H: headerH}, head)
-		title := filepath.Base(s.Profile.Shell) + "  ·  " + s.Profile.Name
-		p.label(p.shortenLabel(title, max(0, r.W-120)), r.X+12, r.Y+4, muted, false)
+		p.fittedLabel(max(0, r.W-120), r.X+12, r.Y+4, muted, filepath.Base(s.Profile.Shell), "  ·  ", s.Profile.Name)
 		if r.W > 230 {
-			p.label(fmt.Sprintf("%d × %d", s.Term.Width(), s.Term.Height()), r.X+r.W-100, r.Y+4, muted, false)
+			buf := strconv.AppendInt(number[:0], int64(s.Term.Width()), 10)
+			buf = append(buf, " × "...)
+			buf = strconv.AppendInt(buf, int64(s.Term.Height()), 10)
+			p.label(string(buf), r.X+r.W-100, r.Y+4, muted, false)
 		}
 	}
 	start := s.HistoryLen() - pane.Scroll
 	cols, rows := s.Term.Width(), s.Term.Height()
-	visibleMatches := map[int][]terminal.Match{}
+	s.SetViewport(start, rows)
+	var visibleMatches []terminal.Match
 	if a.search && active {
-		for _, m := range a.matches {
-			if m.Row >= start && m.Row < start+rows {
-				visibleMatches[m.Row] = append(visibleMatches[m.Row], m)
-			}
-		}
+		first, _ := slices.BinarySearchFunc(a.matches, start, matchRow)
+		last, _ := slices.BinarySearchFunc(a.matches, start+rows, matchRow)
+		visibleMatches = a.matches[first:last]
 	}
 	x0, y0 := r.X+12, r.Y+headerH+8
 	defaultBG := fromColor(s.Term.BackgroundColor(), background)
@@ -121,30 +175,28 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 	// Adjacent cells usually share a background. Submit one rectangle per run
 	// rather than thousands of identical cell rectangles on every cursor blink.
 	for y := 0; y < rows; y++ {
+		rowEnd := 0
+		for rowEnd < len(visibleMatches) && visibleMatches[rowEnd].Row == start+y {
+			rowEnd++
+		}
+		rowMatches := visibleMatches[:rowEnd]
+		visibleMatches = visibleMatches[rowEnd:]
+		matchIndex := 0
 		runStart := 0
 		runColor := defaultBG
 		flush := func(end int) {
 			p.rect(workspace.Rect{X: x0 + float32(runStart)*p.cellW, Y: y0 + float32(y)*p.lineH, W: float32(end-runStart) * p.cellW, H: p.lineH}, runColor)
 		}
 		for x := 0; x < cols; x++ {
-			c := s.Cell(x, start+y)
-			bg := defaultBG
-			if c != nil {
-				bg = fromColor(s.ResolveColor(c.Style.Bg), bg)
-				if c.Style.Attrs&uv.AttrReverse != 0 {
-					bg = fromColor(s.ResolveColor(c.Style.Fg), foreground)
-				}
-			}
+			bg := cellBackground(s, x, start+y, defaultBG, defaultFG)
 			if selected(pane, start+y, x) {
 				bg = selection
 			}
-			if a.search && active {
-				for _, m := range visibleMatches[start+y] {
-					if m.Row == start+y && x >= m.Col && x < m.Col+m.Width {
-						bg = rgb(0x66552e)
-						break
-					}
-				}
+			for matchIndex < len(rowMatches) && x >= rowMatches[matchIndex].Col+rowMatches[matchIndex].Width {
+				matchIndex++
+			}
+			if matchIndex < len(rowMatches) && x >= rowMatches[matchIndex].Col {
+				bg = rgb(0x66552e)
 			}
 			if x > 0 && bg != runColor {
 				flush(x)
@@ -170,11 +222,16 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 		p.rect(workspace.Rect{X: x0 + float32(cursor.X)*p.cellW, Y: y0 + float32(cursor.Y)*p.lineH + 2, W: 2, H: p.lineH - 4}, accent)
 	}
 	if pane.Scroll > 0 {
-		label := fmt.Sprintf("%d lines · type to return", pane.Scroll)
+		buf := strconv.AppendInt(number[:0], int64(pane.Scroll), 10)
+		label := string(append(buf, " lines · type to return"...))
 		w := p.labelWidth(label) + 20
 		p.rect(workspace.Rect{X: r.X + r.W - w - 10, Y: r.Y + r.H - 30, W: w, H: 25}, surface)
 		p.label(label, r.X+r.W-w, r.Y+r.H-25, accent, false)
 	}
+}
+
+func matchRow(m terminal.Match, row int) int {
+	return m.Row - row
 }
 func (a *App) drawNotice() {
 	if !time.Now().Before(a.noticeUntil) {
@@ -206,42 +263,44 @@ func (a *App) drawOverlay() {
 		title = "Preferences"
 	}
 	p.label(title, r.X+24, r.Y+22, foreground, true)
-	a.addIconButton("close", workspace.Rect{X: r.X + r.W - 46, Y: r.Y + 14, W: 32, H: 32}, func() { a.overlay = ""; a.dirty = true })
+	a.addIconButton("close", workspace.Rect{X: r.X + r.W - 46, Y: r.Y + 14, W: 32, H: 32}, actionCloseOverlay, 0)
 	y := r.Y + 65
 	switch a.overlay {
 	case "profiles":
 		p.label("Open a new tab with a profile", r.X+24, y, muted, false)
 		y += 38
-		for _, profile := range a.cfg.Profiles {
-			profile := profile
-			a.addButton(p.shortenLabel(profile.Name+"  ·  "+filepath.Base(profile.Shell), w-70), workspace.Rect{X: r.X + 20, Y: y, W: w - 40, H: 40}, true, func() { a.runAction(func() error { return a.newTab(profile) }); a.overlay = "" })
+		for index, profile := range a.cfg.Profiles {
+			r := workspace.Rect{X: r.X + 20, Y: y, W: w - 40, H: 40}
+			a.buttons = append(a.buttons, button{rect: r, action: actionOpenProfile, value: index})
+			p.rect(r, surface)
+			p.fittedLabel(w-70, r.X+10, r.Y+(r.H-p.size)/2-1, foreground, profile.Name, "  ·  ", filepath.Base(profile.Shell))
 			y += 46
 		}
 		p.label("Edit profiles in config.json; restart to reload.", r.X+24, r.Y+r.H-40, muted, false)
 	case "settings":
-		p.label(fmt.Sprintf("Font size    %d px", a.cfg.FontSize), r.X+24, y, foreground, false)
-		a.addIconButton("minus", workspace.Rect{X: r.X + w - 120, Y: y - 5, W: 38, H: 32}, func() { a.setFontSize(a.cfg.FontSize - 1) })
-		a.addIconButton("plus", workspace.Rect{X: r.X + w - 70, Y: y - 5, W: 38, H: 32}, func() { a.setFontSize(a.cfg.FontSize + 1) })
+		var number [64]byte
+		buf := append(number[:0], "Font size    "...)
+		buf = strconv.AppendInt(buf, int64(a.cfg.FontSize), 10)
+		p.label(string(append(buf, " px"...)), r.X+24, y, foreground, false)
+		a.addIconButton("minus", workspace.Rect{X: r.X + w - 120, Y: y - 5, W: 38, H: 32}, actionFontDelta, -1)
+		a.addIconButton("plus", workspace.Rect{X: r.X + w - 70, Y: y - 5, W: 38, H: 32}, actionFontDelta, 1)
 		y += 48
-		p.label(fmt.Sprintf("Scrollback   %d lines", a.cfg.Scrollback), r.X+24, y, foreground, false)
+		buf = append(number[:0], "Scrollback   "...)
+		buf = strconv.AppendInt(buf, int64(a.cfg.Scrollback), 10)
+		p.label(string(append(buf, " lines"...)), r.X+24, y, foreground, false)
 		y += 40
-		p.label("Font         "+fontName(a.cfg.FontPath), r.X+24, y, foreground, false)
+		p.fittedLabel(w-48, r.X+24, y, foreground, "Font         ", fontName(a.cfg.FontPath))
 		y += 50
 		p.label("Configuration file", r.X+24, y, muted, false)
 		y += 28
-		p.label(p.shortenLabel(a.configPath, w-48), r.X+24, y, foreground, false)
+		p.fittedLabel(w-48, r.X+24, y, foreground, a.configPath)
 		y += 45
 		p.label("Profiles, shell, directory and font are configurable.", r.X+24, y, muted, false)
 		y += 27
 		p.label("Restart after editing config.json.", r.X+24, y, muted, false)
-		a.addButton("Save preferences", workspace.Rect{X: r.X + 24, Y: r.Y + r.H - 63, W: 190, H: 38}, true, a.saveConfig)
+		a.addButton("Save preferences", workspace.Rect{X: r.X + 24, Y: r.Y + r.H - 63, W: 190, H: 38}, true, actionSaveConfig, 0)
 	default:
-		mod := "Ctrl+Shift+"
-		if runtime.GOOS == "darwin" {
-			mod = "Cmd+"
-		}
-		rows := [][2]string{{mod + "T", "New tab"}, {mod + "W", "Close pane"}, {mod + "D / E", "Split columns / rows"}, {"Ctrl+Tab / Alt+1…9", "Switch tab"}, {"Alt+Left / Right", "Switch pane"}, {mod + "F", "Find in terminal history"}, {mod + "C / V", "Copy selection / paste"}, {"PageUp / PageDown", "Scroll history"}, {"Shift+Home / End", "Oldest history / live screen"}, {"Home / End", "Line start / end"}, {mod + "+ / −", "Adjust font size"}, {mod + ", / P", "Preferences / profiles"}, {"F11 / Esc", "Fullscreen / dismiss"}}
-		for _, row := range rows {
+		for _, row := range shortcutRows {
 			p.label(row[0], r.X+24, y, accent, false)
 			p.label(row[1], r.X+w*.51, y, foreground, false)
 			y += 29

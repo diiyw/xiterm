@@ -26,6 +26,26 @@ x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ct
 x11.XFlush.argtypes = [ctypes.c_void_p]
 x11.XFree.argtypes = [ctypes.c_void_p]
 x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+
+class XWindowAttributes(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int), ("y", ctypes.c_int),
+        ("width", ctypes.c_int), ("height", ctypes.c_int),
+        ("border_width", ctypes.c_int), ("depth", ctypes.c_int),
+        ("visual", ctypes.c_void_p), ("root", ctypes.c_ulong),
+        ("window_class", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+        ("win_gravity", ctypes.c_int), ("backing_store", ctypes.c_int),
+        ("backing_planes", ctypes.c_ulong), ("backing_pixel", ctypes.c_ulong),
+        ("save_under", ctypes.c_int), ("colormap", ctypes.c_ulong),
+        ("map_installed", ctypes.c_int), ("map_state", ctypes.c_int),
+        ("all_event_masks", ctypes.c_long), ("your_event_mask", ctypes.c_long),
+        ("do_not_propagate_mask", ctypes.c_long), ("override_redirect", ctypes.c_int),
+        ("screen", ctypes.c_void_p),
+    ]
+
+
+x11.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(XWindowAttributes)]
 x11.XResizeWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_uint, ctypes.c_uint]
 x11.XMoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
 xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
@@ -108,7 +128,11 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
             parent, root_return = ctypes.c_ulong(), ctypes.c_ulong()
             array, count = ctypes.POINTER(ctypes.c_ulong)(), ctypes.c_uint()
             x11.XQueryTree(display, root, ctypes.byref(root_return), ctypes.byref(parent), ctypes.byref(array), ctypes.byref(count))
-            windows[:] = [array[i] for i in range(count.value)]
+            windows.clear()
+            for index in range(count.value):
+                attrs = XWindowAttributes()
+                if x11.XGetWindowAttributes(display, array[index], ctypes.byref(attrs)) and attrs.map_state == 2:
+                    windows.append(array[index])
             if array:
                 x11.XFree(array)
             return bool(windows)
@@ -183,6 +207,55 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         wait_for(raw_result.exists, "Full-screen navigation did not reach the PTY")
         assert raw_result.read_bytes() == b"\x1bOH\x1bOF\x1b[5~\x1b[6~", raw_result.read_bytes()
         time.sleep(0.2)
+        # A continuously repainting raw TUI must receive every keystroke
+        # promptly, including while its output queue stays backpressured.
+        busy_script = temp / "busy-input.py"
+        busy_ready, busy_result = temp / "busy-ready", temp / "busy-result"
+        typed = "frequentlyrefreshingterminalinput" * 3
+        busy_script.write_text(
+            "import json, os, pathlib, termios, threading, time, tty\n"
+            "old = termios.tcgetattr(0)\n"
+            "stopped = threading.Event()\n"
+            "def repaint():\n"
+            "    cols, rows = os.get_terminal_size(1)\n"
+            "    line = (b'frequently refreshing application ' * cols)[:cols - 1]\n"
+            "    frame = b'\\x1b[H' + (b'\\x1b[32m' + line + b'\\x1b[0m\\r\\n') * (rows - 2)\n"
+            "    while not stopped.is_set():\n"
+            "        os.write(1, frame)\n"
+            "try:\n"
+            "    tty.setraw(0)\n"
+            "    os.write(1, b'\\x1b[?1049h\\x1b[?25l')\n"
+            "    writer = threading.Thread(target=repaint, daemon=True)\n"
+            "    writer.start()\n"
+            f"    pathlib.Path({str(busy_ready)!r}).touch()\n"
+            "    received = []\n"
+            f"    while len(received) < {len(typed)}:\n"
+            "        data = os.read(0, 1)\n"
+            "        received.append([data.decode('ascii'), time.monotonic()])\n"
+            "    stopped.set()\n"
+            "    writer.join(timeout=3)\n"
+            f"    pathlib.Path({str(busy_result)!r}).write_text(json.dumps(received))\n"
+            "finally:\n"
+            "    stopped.set()\n"
+            "    os.write(1, b'\\x1b[0m\\x1b[?25h\\x1b[?1049l')\n"
+            "    termios.tcsetattr(0, termios.TCSANOW, old)\n"
+        )
+        type_text(f"python3 {busy_script}")
+        wait_for(busy_ready.exists, "Continuously refreshing TUI did not start")
+        time.sleep(0.2)
+        sent = []
+        for char in typed:
+            sent.append(time.monotonic())
+            key(ord(char)); key(ord(char), False)
+            time.sleep(0.008)
+        wait_for(busy_result.exists, "Input stalled during continuous TUI repainting")
+        received = json.loads(busy_result.read_text())
+        assert "".join(char for char, _ in received) == typed, "Busy TUI input was lost or reordered"
+        latencies = sorted(at - started for (_, at), started in zip(received, sent))
+        p95 = latencies[int(len(latencies) * 0.95)]
+        assert p95 < 0.150, f"Busy TUI input p95 latency is {p95 * 1000:.1f} ms"
+        print(f"Busy TUI input: p95={p95 * 1000:.1f} ms, max={max(latencies) * 1000:.1f} ms", flush=True)
+        time.sleep(0.2)
         # Wide Chinese glyphs must retain ink in both terminal columns. Use
         # escapes for input so this check does not need an installed IME.
         chinese = "".join(r"\u" + f"{ord(char):04x}" for char in "腾讯应用宝")
@@ -235,8 +308,8 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         terminal_size("restored-size", 1200, 780)
         # Repeated zoom must release old glyph atlases without breaking text
         # rendering or leaving the PTY at an obsolete font size.
-        def open_preferences():
-            click(350, 100, 3)
+        def open_preferences(x=350, y=100):
+            click(x, y, 3)
             for _ in range(8):
                 press(0xFF54)
             press(0xFF0D)
@@ -271,6 +344,38 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         wait_for(lambda: len(children(process.pid)) == 2, "Column split did not create a second shell")
         chord("e")
         wait_for(lambda: len(children(process.pid)) == 3, "Nested row split did not create a third shell")
+        # Even-sized windows put split origins on fractional pixels. Adjacent
+        # background runs must stay opaque there, including after font zoom.
+        def check_grid_backgrounds(font_size):
+            grid_ready = temp / f"grid-{font_size}-ready"
+            grid = "\\033[2J\\033[H\\033[?25l"
+            for row in range(4):
+                grid += f"\\033[{row + 1};1H"
+                for col in range(20):
+                    color = "152;195;121" if (row + col) % 2 == 0 else "86;182;194"
+                    grid += f"\\033[48;2;{color}m "
+            grid += "\\033[0m\\033[6;1H"
+            type_text(f"printf '{grid}'; touch {grid_ready}")
+            wait_for(grid_ready.exists, "Grid background output did not complete")
+            time.sleep(0.2)
+            grid_image = ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).convert("RGB")
+            grid_image.save(ROOT / f"artifacts/grid-backgrounds-{font_size}.png")
+            # The lower-right pane starts at (600.5, 411.5), then has 12 px
+            # horizontal padding, a 24 px header and 8 px vertical padding.
+            # Stay inside the outer edges while inspecting every inner seam.
+            region = grid_image.crop((614, 445, 790, 443 + 4 * (font_size + 7)))
+            colors = set(region.getdata())
+            allowed = {(152, 195, 121), (86, 182, 194)}
+            assert colors == allowed, f"Grid background seams at font {font_size}: {colors - allowed}"
+        check_grid_backgrounds(15)
+        open_preferences(800, 500)
+        click(879, 211)  # Font size 16: fractional cell advance.
+        press(0xFF1B)
+        check_grid_backgrounds(16)
+        open_preferences(800, 500)
+        click(829, 211)
+        press(0xFF1B)
+        type_text(r"printf '\033[2J\033[H\033[?25h'")
         type_text("printf 'independent shell session\\n'; stty size")
         chord("t")
         wait_for(lambda: len(children(process.pid)) == 4, "New tab did not create an independent shell")
@@ -297,7 +402,7 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         process.wait(timeout=8)
         assert process.returncode == 0, process.stderr.read().decode()
         wait_for(lambda: all(not Path(f"/proc/{pid}").exists() for pid in child_pids), "Shell processes survived window close")
-        print(f"PASS: cd input, Up/Down history/drafts, Home/End editing, full-screen navigation, Chinese glyphs, history paging/endpoints, real PTY grow/shrink {base}/{grown}/{shrunk}, repeated font zoom/reset, SVG context menu, nested splits, tabs, search, save, exit/last-tab cleanup; screenshot {output}")
+        print(f"PASS: cd input, Up/Down history/drafts, Home/End editing, full-screen navigation, Chinese glyphs, history paging/endpoints, real PTY grow/shrink {base}/{grown}/{shrunk}, repeated font zoom/reset, SVG context menu, nested splits, seamless grid backgrounds at 15/16 px, tabs, search, save, exit/last-tab cleanup; screenshot {output}")
     finally:
         if process.poll() is None:
             ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(ROOT / "artifacts/native-failure.png")

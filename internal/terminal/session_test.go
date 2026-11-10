@@ -74,6 +74,56 @@ func TestCloseKillsShellProcessGroup(t *testing.T) {
 		t.Fatalf("shell still alive: %v", err)
 	}
 }
+
+func TestCloseDrainsFullOutputQueueAndReleasesBlocks(t *testing.T) {
+	s := startShell(t, `while :; do printf 'terminal output with a payload\n'; done`)
+	deadline := time.Now().Add(3 * time.Second)
+	for len(s.output) < cap(s.output) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(s.output) != cap(s.output) {
+		t.Fatal("output backpressure fixture did not fill queue")
+	}
+	done := make(chan struct{})
+	go func() {
+		s.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("close blocked behind a full output queue")
+	}
+	if len(s.output) != 0 || len(s.outputPool.free) != 0 || s.pendingBuffer != nil {
+		t.Fatal("closed session retained output blocks")
+	}
+}
+
+func TestCloseUnblocksBackpressuredInput(t *testing.T) {
+	s := startShell(t, `stty raw -echo; printf READY; sleep 120`)
+	waitFor(t, s, func() bool { return strings.Contains(s.Term.String(), "READY") })
+	if err := s.Resize(90, 30); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		s.SendText(strings.Repeat("input", 1<<18))
+		close(done)
+	}()
+	// The child does not read. Once the large write blocks, closing must release
+	// the pipe writer, collector, and PTY writer without waiting for the child.
+	select {
+	case <-done:
+		t.Fatal("input backpressure fixture unexpectedly completed")
+	case <-time.After(30 * time.Millisecond):
+	}
+	s.Close()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("closing left the input producer blocked")
+	}
+}
 func TestSelectionSearchWideCellsAndAlternateScreen(t *testing.T) {
 	s := &Session{Term: vt.NewEmulator(20, 3)}
 	defer s.Term.Close()

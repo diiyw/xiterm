@@ -22,6 +22,7 @@ import (
 	"github.com/onix-engine/onix/text"
 	"github.com/onix-engine/onix/window"
 	iconpng "github.com/onix-engine/onix/window/codec/png"
+	"github.com/onix-engine/onix/window/filedialog"
 )
 
 const (
@@ -32,48 +33,57 @@ const (
 
 type button struct {
 	rect   workspace.Rect
-	label  string
-	action func()
-	active bool
+	action buttonAction
+	value  int
 }
+
+type pollPane struct {
+	pane *workspace.Pane
+	tab  int
+}
+
 type App struct {
-	textInput      textInputState
-	logo           *graphics.Texture
-	icons          map[string]*graphics.Texture
-	keyModifiers   func(input.KeyCode) (uv.KeyMod, bool)
-	nerdFont       *text.Font
-	uiFont         *text.Font
-	mousePane      *workspace.Pane
-	dragSplit      *workspace.Node
-	lastTitle      string
-	mouseX, mouseY float32
-	win            *window.Context
-	cfg            config.Config
-	configPath     string
-	tabs           []*workspace.Tab
-	active         int
-	paint          painter
-	font, boldFont *text.Font
-	buttons        []button
-	keys           map[input.KeyCode]bool
-	search         bool
-	query          string
-	matches        []terminal.Match
-	matchIndex     int
-	searchRevision uint64
-	searchSession  *terminal.Session
-	overlay        string
-	menu           bool
-	menuX, menuY   float32
-	menuIndex      int
-	notice         string
-	noticeUntil    time.Time
-	dragPane       *workspace.Pane
-	width, height  float32
-	dirty          bool
-	blink          bool
-	blinkAt        time.Time
-	smokeDeadline  time.Time
+	textInput        textInputState
+	logo             *graphics.Texture
+	icons            map[string]*graphics.Texture
+	keyModifiers     func(input.KeyCode) (uv.KeyMod, bool)
+	nerdFont         *text.Font
+	uiFont           *text.Font
+	mousePane        *workspace.Pane
+	dragSplit        *workspace.Node
+	lastTitle        string
+	lastSessionTitle string
+	mouseX, mouseY   float32
+	win              *window.Context
+	cfg              config.Config
+	configPath       string
+	tabs             []*workspace.Tab
+	active           int
+	paint            painter
+	font, boldFont   *text.Font
+	buttons          []button
+	keys             map[input.KeyCode]bool
+	search           bool
+	query            string
+	matches          []terminal.Match
+	matchIndex       int
+	searchRevision   uint64
+	searchSession    *terminal.Session
+	overlay          string
+	menu             bool
+	menuX, menuY     float32
+	menuIndex        int
+	notice           string
+	noticeUntil      time.Time
+	dragPane         *workspace.Pane
+	width, height    float32
+	dirty            bool
+	blink            bool
+	blinkAt          time.Time
+	paintAt          time.Time
+	pollOffset       int
+	pollPanes        []pollPane
+	smokeDeadline    time.Time
 }
 
 type Options struct {
@@ -85,9 +95,12 @@ type Options struct {
 
 func Run(opts Options) error {
 	runtime.LockOSThread()
+	filedialog.Register()
 	a := &App{cfg: opts.Config, configPath: opts.ConfigPath, keys: map[input.KeyCode]bool{}, dirty: true, matchIndex: -1}
 	a.win = window.NewContext(a.cfg.Width, a.cfg.Height, "XiTerm", window.DefaultOptions())
 	defer a.win.Destroy()
+	a.paint.solid = graphics.CreateTextureByColor(graphics.White)
+	defer a.paint.solid.Dispose()
 	a.win.SetIconDecoder(iconpng.Decoder{})
 	if err := a.win.SetIcon(assets.IconPNG); err != nil {
 		return fmt.Errorf("set application icon: %w", err)
@@ -110,7 +123,9 @@ func Run(opts Options) error {
 	}
 	defer a.disposeIcons()
 	a.win.SetVsyncEnabled(true)
-	a.win.SetTargetFPS(30)
+	// Pace painting ourselves so native input and PTY parsing can continue
+	// between frames without sleeping inside Onix's event loop.
+	a.win.SetTargetFPS(0)
 	regular, bold := assets.Regular, assets.Bold
 	if a.cfg.FontPath != "" {
 		b, err := os.ReadFile(a.cfg.FontPath)
@@ -175,7 +190,7 @@ func Run(opts Options) error {
 			a.height = float32(h)
 			a.dirty = true
 		}
-		if !a.dirty {
+		if !a.frameReady(time.Now()) {
 			return false, nil
 		}
 		a.dirty = false
@@ -198,9 +213,6 @@ func (a *App) cursorCanBlink() bool {
 }
 
 func (a *App) idleDeadline() (time.Time, bool) {
-	if a.dirty || a.win.FrameRequested() {
-		return time.Time{}, false
-	}
 	for _, t := range a.tabs {
 		pending := false
 		t.Root.Visit(func(p *workspace.Pane) { pending = pending || p.Session.PendingOutput() })
@@ -209,8 +221,16 @@ func (a *App) idleDeadline() (time.Time, bool) {
 		}
 	}
 	var deadline time.Time
+	if a.dirty || a.win.FrameRequested() {
+		if !time.Now().Before(a.paintAt) {
+			return time.Time{}, false
+		}
+		deadline = a.paintAt
+	}
 	if a.cursorCanBlink() {
-		deadline = a.blinkAt
+		if deadline.IsZero() || a.blinkAt.Before(deadline) {
+			deadline = a.blinkAt
+		}
 	}
 	for _, next := range []time.Time{a.noticeUntil, a.smokeDeadline} {
 		if !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
@@ -218,6 +238,15 @@ func (a *App) idleDeadline() (time.Time, bool) {
 		}
 	}
 	return deadline, true
+}
+
+// Limit painting to 60 FPS while leaving event handling free to run sooner.
+func (a *App) frameReady(now time.Time) bool {
+	if !a.dirty || now.Before(a.paintAt) {
+		return false
+	}
+	a.paintAt = now.Add(time.Second / 60)
+	return true
 }
 
 func (a *App) advanceTimers(now time.Time) {
@@ -336,7 +365,7 @@ func (a *App) closePaneAt(index int, p *workspace.Pane) {
 		}
 		a.active = min(a.active, len(a.tabs)-1)
 	} else if t.Active == p {
-		t.Active = t.Root.Panes()[0]
+		t.Active = t.Root.FirstPane()
 	}
 	a.dragPane = nil
 	a.dragSplit = nil
@@ -375,37 +404,55 @@ func (a *App) notify(message string) {
 	a.dirty = true
 }
 func (a *App) poll() {
-	for _, t := range a.tabs {
-		t.Root.Visit(func(p *workspace.Pane) {
-			history := p.Session.HistoryLen()
-			if p.Session.Poll() {
-				if p.Scroll > 0 {
-					p.Scroll += max(0, p.Session.HistoryLen()-history)
-				}
-				a.dirty = true
-				p.Scroll = min(p.Scroll, p.Session.HistoryLen())
-				if a.dragPane != p {
-					p.Selected = false
-				}
-			}
-		})
+	panes := a.pollPanes[:0]
+	for i, t := range a.tabs {
+		t.Root.Visit(func(p *workspace.Pane) { panes = append(panes, pollPane{pane: p, tab: i}) })
 	}
-	// Remove exited sessions after polling so slice mutations cannot skip a tab.
-	for i := len(a.tabs) - 1; i >= 0; i-- {
-		for _, p := range a.tabs[i].Root.Panes() {
-			if p.Session.Exited {
-				a.closePaneAt(i, p)
+	deadline := time.Now().Add(4 * time.Millisecond)
+	for i, start := 0, a.pollOffset; i < len(panes); i++ {
+		index := (start + i) % len(panes)
+		p := panes[index].pane
+		history := p.Session.HistoryLen()
+		if p.Session.PollUntil(deadline) {
+			if p.Scroll > 0 {
+				p.Scroll += max(0, p.Session.HistoryLen()-history)
+			}
+			a.dirty = true
+			p.Scroll = min(p.Scroll, p.Session.HistoryLen())
+			if a.dragPane != p {
+				p.Selected = false
 			}
 		}
+		a.pollOffset = (index + 1) % len(panes)
+		if !time.Now().Before(deadline) {
+			break
+		}
 	}
+	// Remove exited sessions after polling so slice mutations cannot skip a tab.
+	for _, p := range panes {
+		if !p.pane.Session.Exited {
+			a.handleTransfer(p.pane.Session)
+		}
+	}
+	for i := len(panes) - 1; i >= 0; i-- {
+		if p := panes[i]; p.pane.Session.Exited {
+			a.closePaneAt(p.tab, p.pane)
+		}
+	}
+	// Preserve capacity without retaining sessions removed during this poll.
+	clear(panes)
+	a.pollPanes = panes[:0]
 	if p := a.pane(); p != nil {
 		if a.search && (a.searchSession != p.Session || a.searchRevision != p.Session.Revision) {
 			a.updateSearch(false)
 		}
-		title := "XiTerm — " + shorten(p.Session.Title, 80)
-		if title != a.lastTitle {
-			a.win.SetTitle(title)
-			a.lastTitle = title
+		if p.Session.Title != a.lastSessionTitle || a.lastTitle == "" {
+			title := "XiTerm — " + shorten(p.Session.Title, 80)
+			if title != a.lastTitle {
+				a.win.SetTitle(title)
+				a.lastTitle = title
+			}
+			a.lastSessionTitle = p.Session.Title
 		}
 	}
 }
@@ -429,11 +476,8 @@ func (a *App) layout() {
 }
 func (a *App) paneHeaderHeight(p *workspace.Pane) float32 {
 	for _, t := range a.tabs {
-		panes := t.Root.Panes()
-		for _, pane := range panes {
-			if pane == p && len(panes) > 1 {
-				return paneHeadH
-			}
+		if t.Root.Pane == nil && t.Root.Contains(p) {
+			return paneHeadH
 		}
 	}
 	return 0
@@ -449,7 +493,7 @@ func (a *App) updateSearch(jump bool) {
 	if p == nil {
 		return
 	}
-	a.matches = p.Session.Find(a.query)
+	a.matches = p.Session.FindInto(a.matches, a.query)
 	a.searchRevision = p.Session.Revision
 	a.searchSession = p.Session
 	if len(a.matches) == 0 {
@@ -520,8 +564,8 @@ func localDirectory(value string) string {
 	}
 	return ""
 }
-func (a *App) addButton(label string, r workspace.Rect, active bool, action func()) {
-	a.buttons = append(a.buttons, button{rect: r, label: label, action: action, active: active})
+func (a *App) addButton(label string, r workspace.Rect, active bool, action buttonAction, value int) {
+	a.buttons = append(a.buttons, button{rect: r, action: action, value: value})
 	if active {
 		a.paint.rect(r, surface)
 	}

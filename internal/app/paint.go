@@ -2,12 +2,12 @@ package app
 
 import (
 	"image/color"
+	"math"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/diiyw/xiterm/assets"
 	"github.com/diiyw/xiterm/internal/workspace"
 	"github.com/onix-engine/onix/graphics"
-	"github.com/onix-engine/onix/render"
 	"github.com/onix-engine/onix/text"
 )
 
@@ -35,6 +35,7 @@ func fromColor(c color.Color, fallback graphics.ColorRGBA) graphics.ColorRGBA {
 
 type painter struct {
 	canvas        *graphics.Canvas2D
+	solid         *graphics.Texture
 	regular, bold *text.GlyphCache
 	nerd          *text.GlyphCache
 	ui            *text.GlyphCache
@@ -57,9 +58,20 @@ func (p *painter) rect(r workspace.Rect, c graphics.ColorRGBA) {
 	if r.W <= 0 || r.H <= 0 {
 		return
 	}
-	p.canvas.DrawShapeAffine([6]float32{r.W, 0, r.X, 0, r.H, r.Y}, [6]float32{1, 0, 0, 0, 1, 0}, r.W, r.H, render.ShapeRoundedRect, c, graphics.ColorRGBA{}, 0, 0, 1)
+	// Grid fills need hard edges: independently antialiased shapes leave seams
+	// where adjacent cells meet, especially at fractional split-pane origins.
+	// Snap both edges to physical pixels rather than rounding each width.
+	scale := p.canvas.RasterScale()
+	snap := func(v float32) float32 { return float32(math.Round(float64(v)*scale) / scale) }
+	x, y := snap(r.X), snap(r.Y)
+	w, h := snap(r.X+r.W)-x, snap(r.Y+r.H)-y
+	if w <= 0 || h <= 0 {
+		return
+	}
+	p.canvas.BindTexture(p.solid)
+	p.canvas.DrawTintedAffine([6]float32{w, 0, x, 0, h, y}, [6]float32{1, 0, 0, 0, 1, 0}, c, 1)
 }
-func (p *painter) label(value string, x, y float32, c graphics.ColorRGBA, bold bool) {
+func (p *painter) label(value string, x, y float32, c graphics.ColorRGBA, bold bool) float32 {
 	cache := p.labelCache()
 	for _, r := range value {
 		g := cache.Glyph(r)
@@ -69,6 +81,7 @@ func (p *painter) label(value string, x, y float32, c graphics.ColorRGBA, bold b
 		}
 		x += g.Advance
 	}
+	return x
 }
 
 func (p *painter) labelCache() *text.GlyphCache {
@@ -101,6 +114,41 @@ func (p *painter) shortenLabel(value string, width float32) string {
 		}
 	}
 	return value
+}
+
+// fittedLabel draws adjacent strings with a shared width limit. Drawing the
+// prefix and ellipsis separately avoids allocating a truncated label each frame.
+func (p *painter) fittedLabel(width, x, y float32, c graphics.ColorRGBA, values ...string) {
+	var total float32
+	for _, value := range values {
+		total += p.labelWidth(value)
+	}
+	if total <= width {
+		for _, value := range values {
+			x = p.label(value, x, y, c, false)
+		}
+		return
+	}
+	ellipsis := p.labelWidth("…")
+	if width < ellipsis {
+		return
+	}
+	width -= ellipsis
+	for _, value := range values {
+		var advance float32
+		for i, r := range value {
+			next := p.labelCache().GlyphMetrics(r).Advance
+			if advance+next > width {
+				p.label(value[:i], x, y, c, false)
+				p.label("…", x+advance, y, c, false)
+				return
+			}
+			advance += next
+		}
+		p.label(value, x, y, c, false)
+		x += advance
+		width -= advance
+	}
 }
 func (p *painter) glyph(cache *text.GlyphCache, g text.Glyph, x, baseline float32, c graphics.ColorRGBA) {
 	if !g.Visible() {
@@ -149,9 +197,15 @@ func (p *painter) cell(c *uv.Cell, x, y float32, fg, bg graphics.ColorRGBA) {
 	}
 }
 func shorten(s string, limit int) string {
-	r := []rune(s)
-	if len(r) > limit {
-		return string(r[:max(0, limit-1)]) + "…"
+	count, end := 0, 0
+	for i := range s {
+		if count == max(0, limit-1) {
+			end = i
+		}
+		count++
+		if count > limit {
+			return s[:end] + "…"
+		}
 	}
 	return s
 }

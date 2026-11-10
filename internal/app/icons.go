@@ -44,8 +44,8 @@ func (a *App) drawIcon(name string, r workspace.Rect, color graphics.ColorRGBA) 
 	}
 }
 
-func (a *App) addIconButton(name string, r workspace.Rect, action func()) {
-	a.buttons = append(a.buttons, button{rect: r, label: name, action: action})
+func (a *App) addIconButton(name string, r workspace.Rect, action buttonAction, value int) {
+	a.buttons = append(a.buttons, button{rect: r, action: action, value: value})
 	color := muted
 	if r.Contains(a.mouseX, a.mouseY) {
 		a.paint.rect(r, surface)

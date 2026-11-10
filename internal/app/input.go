@@ -252,12 +252,12 @@ func (a *App) keydown(key input.KeyCode) {
 		switch key {
 		case input.KeyUp:
 			if a.menuIndex < 0 {
-				a.menuIndex = len(a.menuItems()) - 1
+				a.menuIndex = len(menuItems) - 1
 			} else {
-				a.menuIndex = (a.menuIndex - 1 + len(a.menuItems())) % len(a.menuItems())
+				a.menuIndex = (a.menuIndex - 1 + len(menuItems)) % len(menuItems)
 			}
 		case input.KeyDown:
-			a.menuIndex = (a.menuIndex + 1) % len(a.menuItems())
+			a.menuIndex = (a.menuIndex + 1) % len(menuItems)
 		case input.KeyEnter:
 			a.activateMenu(a.menuIndex)
 		}
@@ -506,14 +506,9 @@ func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 			return
 		}
 		if t := a.tab(); t != nil {
-			for _, p := range t.Root.Panes() {
-				if p.Bounds.Contains(x, y) {
-					if t.Active != p {
-						t.Active = p
-						a.resetSearch()
-					}
-					break
-				}
+			if p := t.Root.PaneAt(x, y); p != nil && t.Active != p {
+				t.Active = p
+				a.resetSearch()
 			}
 		}
 		a.dragPane, a.dragSplit, a.mousePane = nil, nil, nil
@@ -535,7 +530,7 @@ func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 	}
 	for i := len(a.buttons) - 1; i >= 0; i-- {
 		if a.buttons[i].rect.Contains(x, y) {
-			a.buttons[i].action()
+			a.activateButton(a.buttons[i].action, a.buttons[i].value)
 			return
 		}
 	}
@@ -548,21 +543,19 @@ func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 			a.dragSplit = divider
 			return
 		}
-		for _, p := range t.Root.Panes() {
-			if p.Bounds.Contains(x, y) {
-				t.Active = p
-				a.resetSearch()
-				p.Selected = false
-				if p.Session.MouseTracking && !a.shift() && y >= p.Bounds.Y+a.paneHeaderHeight(p) {
-					a.mousePane = p
-					p.Session.SendMouse(uv.MouseClickEvent(a.mouseEvent(p, x, y, uv.MouseLeft)))
-					return
-				}
-				p.SelectionStart = a.position(p, x, y)
-				p.SelectionEnd = p.SelectionStart
-				a.dragPane = p
+		if p := t.Root.PaneAt(x, y); p != nil {
+			t.Active = p
+			a.resetSearch()
+			p.Selected = false
+			if p.Session.MouseTracking && !a.shift() && y >= p.Bounds.Y+a.paneHeaderHeight(p) {
+				a.mousePane = p
+				p.Session.SendMouse(uv.MouseClickEvent(a.mouseEvent(p, x, y, uv.MouseLeft)))
 				return
 			}
+			p.SelectionStart = a.position(p, x, y)
+			p.SelectionEnd = p.SelectionStart
+			a.dragPane = p
+			return
 		}
 	}
 }
@@ -580,6 +573,19 @@ func (a *App) mouseEvent(p *workspace.Pane, x, y float32, button uv.MouseButton)
 
 // Modified navigation uses xterm's CSI modifier parameter. Unmodified keys
 // still pass through the VT emulator to honor application cursor/keypad modes.
+var modifiedSequences = func() [8][10]string {
+	var sequences [8][10]string
+	for i := range sequences {
+		for j, final := range "ABCDHF" {
+			sequences[i][j] = fmt.Sprintf("\x1b[1;%d%c", i+1, final)
+		}
+		for j, code := range [...]int{2, 3, 5, 6} {
+			sequences[i][6+j] = fmt.Sprintf("\x1b[%d;%d~", code, i+1)
+		}
+	}
+	return sequences
+}()
+
 func modifiedSequence(key input.KeyCode, mods uv.KeyMod) string {
 	if mods == 0 {
 		return ""
@@ -594,37 +600,30 @@ func modifiedSequence(key input.KeyCode, mods uv.KeyMod) string {
 	if mods&uv.ModCtrl != 0 {
 		parameter += 4
 	}
-	final := byte(0)
+	index := 0
 	switch key {
 	case input.KeyUp:
-		final = 'A'
+		index = 0
 	case input.KeyDown:
-		final = 'B'
+		index = 1
 	case input.KeyRight:
-		final = 'C'
+		index = 2
 	case input.KeyLeft:
-		final = 'D'
+		index = 3
 	case input.KeyHome:
-		final = 'H'
+		index = 4
 	case input.KeyEnd:
-		final = 'F'
-	}
-	if final != 0 {
-		return fmt.Sprintf("\x1b[1;%d%c", parameter, final)
-	}
-	code := 0
-	switch key {
+		index = 5
 	case input.KeyInsert:
-		code = 2
+		index = 6
 	case input.KeyDelete:
-		code = 3
+		index = 7
 	case input.KeyPageUp:
-		code = 5
+		index = 8
 	case input.KeyPageDown:
-		code = 6
+		index = 9
+	default:
+		return ""
 	}
-	if code != 0 {
-		return fmt.Sprintf("\x1b[%d;%d~", code, parameter)
-	}
-	return ""
+	return modifiedSequences[parameter-1][index]
 }

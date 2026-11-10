@@ -33,9 +33,61 @@ type Node struct {
 
 func Leaf(p *Pane) *Node { return &Node{Pane: p} }
 func (n *Node) Panes() []*Pane {
-	var out []*Pane
-	n.Visit(func(p *Pane) { out = append(out, p) })
-	return out
+	return n.AppendPanes(nil)
+}
+
+// AppendPanes appends leaves in layout order, reusing dst's capacity.
+func (n *Node) AppendPanes(dst []*Pane) []*Pane {
+	if n == nil {
+		return dst
+	}
+	if n.Pane != nil {
+		return append(dst, n.Pane)
+	}
+	return n.Second.AppendPanes(n.First.AppendPanes(dst))
+}
+
+func (n *Node) PaneCount() int {
+	if n == nil {
+		return 0
+	}
+	if n.Pane != nil {
+		return 1
+	}
+	return n.First.PaneCount() + n.Second.PaneCount()
+}
+
+func (n *Node) Contains(p *Pane) bool {
+	if n == nil {
+		return false
+	}
+	if n.Pane != nil {
+		return n.Pane == p
+	}
+	return n.First.Contains(p) || n.Second.Contains(p)
+}
+
+func (n *Node) FirstPane() *Pane {
+	if n == nil {
+		return nil
+	}
+	if n.Pane != nil {
+		return n.Pane
+	}
+	return n.First.FirstPane()
+}
+
+func (n *Node) PaneAt(x, y float32) *Pane {
+	if n == nil || !n.Bounds.Contains(x, y) {
+		return nil
+	}
+	if n.Pane != nil {
+		return n.Pane
+	}
+	if p := n.First.PaneAt(x, y); p != nil {
+		return p
+	}
+	return n.Second.PaneAt(x, y)
 }
 func (n *Node) Visit(fn func(*Pane)) {
 	if n == nil {
@@ -115,13 +167,28 @@ type Tab struct {
 }
 
 func (t *Tab) FocusNext(delta int) {
-	panes := t.Root.Panes()
-	for i, p := range panes {
-		if p == t.Active {
-			t.Active = panes[(i+delta+len(panes))%len(panes)]
-			return
-		}
+	count := t.Root.PaneCount()
+	if count == 0 {
+		return
 	}
+	index, active := 0, -1
+	t.Root.Visit(func(p *Pane) {
+		if p == t.Active {
+			active = index
+		}
+		index++
+	})
+	if active < 0 {
+		return
+	}
+	target := (active + delta%count + count) % count
+	index = 0
+	t.Root.Visit(func(p *Pane) {
+		if index == target {
+			t.Active = p
+		}
+		index++
+	})
 }
 
 // DividerAt finds the deepest split handle beneath a pointer.
