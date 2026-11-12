@@ -72,7 +72,7 @@ func Start(profile config.Profile, cols, rows, scrollback int, wake func()) (*Se
 		return nil, fmt.Errorf("start %s: %w", profile.Shell, err)
 	}
 
-	s := &Session{Term: vt.NewEmulator(cols, rows), Profile: profile, Title: profile.Name, Directory: profile.Directory, process: f, output: make(chan []byte, ioQueueSize), finished: make(chan error, 1), stop: make(chan struct{}), collectorDone: make(chan struct{}), writerDone: make(chan struct{}), readerDone: make(chan struct{}), outputPool: newBytePool(outputBlockSize)}
+	s := &Session{Term: vt.NewEmulator(cols, rows), Profile: profile, Title: profile.Name, Directory: profile.Directory, process: f, output: make(chan []byte, outputQueueSize), finished: make(chan error, 1), stop: make(chan struct{}), collectorDone: make(chan struct{}), writerDone: make(chan struct{}), readerDone: make(chan struct{}), outputPool: newBytePool(outputBlockSize)}
 	s.wake = wake
 	s.initScrollback(scrollback)
 	s.Term.SetDefaultForegroundColor(color.RGBA{R: 216, G: 222, B: 233, A: 255})
@@ -275,7 +275,6 @@ func (s *Session) PollUntil(deadline time.Time) bool {
 			s.outputPool.put(s.pendingBuffer)
 			s.pendingBuffer = nil
 		}
-		s.collectHistory()
 		if s.Term.ScrollbackLen() < history {
 			s.releaseClearedHistory()
 		}
@@ -284,7 +283,6 @@ func (s *Session) PollUntil(deadline time.Time) bool {
 	}
 done:
 	if s.flushZmodemPrefix(false) {
-		s.collectHistory()
 		changed = true
 	}
 	// Do not discard the final output when process exit arrives during a
@@ -403,6 +401,10 @@ func (s *Session) Close() {
 		for range s.output {
 		}
 		s.outputPool.clear()
+		if s.history != nil {
+			s.history.clear()
+			s.SetHistoryBudget(nil)
+		}
 	})
 }
 
@@ -522,26 +524,8 @@ func (s *Session) FindInto(dst []Match, query string) []Match {
 	}
 	s.findNeedle = appendLower(s.findNeedle[:0], query)
 	needle := s.findNeedle
-	line, columns := s.findLine[:0], s.findColumns[:0]
-	cols, rows := s.Term.Width(), s.HistoryLen()+s.Term.Height()
-	for row := 0; row < rows; row++ {
-		line = line[:0]
-		columns = columns[:0]
-		for x := 0; x < cols; x++ {
-			c, ok := s.cellValue(x, row)
-			value := " "
-			if ok {
-				if c.Width == 0 {
-					continue
-				}
-				value = c.Content
-			}
-			start := len(line)
-			line = appendLower(line, value)
-			for range len(line) - start {
-				columns = append(columns, x)
-			}
-		}
+	for row := 0; row < s.HistoryLen()+s.Term.Height(); row++ {
+		line, columns := s.searchRow(row)
 		for offset := 0; offset < len(line); {
 			i := bytes.Index(line[offset:], needle)
 			if i < 0 {
@@ -549,17 +533,10 @@ func (s *Session) FindInto(dst []Match, query string) []Match {
 			}
 			start := offset + i
 			end := start + len(needle) - 1
-			col := columns[start]
-			last := columns[end]
-			width := 1
-			if cell, ok := s.cellValue(last, row); ok {
-				width = max(1, cell.Width)
-			}
-			matches = append(matches, Match{Row: row, Col: col, Width: last - col + width})
+			matches = append(matches, s.searchMatch(row, start, end, columns))
 			offset = end + 1
 		}
 	}
-	s.findLine, s.findColumns = line[:0], columns[:0]
 	return matches
 }
 

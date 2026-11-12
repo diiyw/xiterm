@@ -84,6 +84,21 @@ def click(x, y, button=1):
     time.sleep(0.15)
 
 
+def drag_tab(start_x, end_x):
+    xtst.XTestFakeMotionEvent(display, -1, start_x, 20, 0)
+    xtst.XTestFakeButtonEvent(display, 1, 1, 0)
+    x11.XFlush(display)
+    time.sleep(0.1)
+    for step in range(1, 13):
+        x = round(start_x + (end_x - start_x) * step / 12)
+        xtst.XTestFakeMotionEvent(display, -1, x, 20, 0)
+        x11.XFlush(display)
+        time.sleep(0.025)
+    xtst.XTestFakeButtonEvent(display, 1, 0, 0)
+    x11.XFlush(display)
+    time.sleep(0.15)
+
+
 def type_text(value, submit=True):
     for char in value:
         shifted = char.isupper() or char in '~!@#$%^&*()_+{}|:"<>?'
@@ -326,6 +341,33 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         reset = terminal_size("font-reset-size", 1200, 780)
         assert zoomed[0] < reset[0] and zoomed[1] < reset[1], (zoomed, reset)
         assert reset == grown, (reset, grown)
+        # Reordering must preserve shell identity and update shortcut/close targets.
+        type_text("export XITERM_TAB=first")
+        for identity in ("second", "third"):
+            chord("t")
+            type_text(f"export XITERM_TAB={identity}")
+        wait_for(lambda: len(children(process.pid)) == 3, "Drag setup did not open three tabs")
+        drag_tab(580, 100)  # third, first, second
+        drag_marker = temp / "drag-active"
+        type_text(f'printf "$XITERM_TAB" > {drag_marker}')
+        wait_for(drag_marker.exists, "Dragged tab lost keyboard focus")
+        assert drag_marker.read_text() == "third", "Drag switched to a different shell"
+        for index, identity in enumerate(("third", "first", "second"), 1):
+            chord(str(index), modifiers=(0xFFE9,))  # Alt+1/2/3
+            result = temp / f"drag-slot-{index}"
+            type_text(f'printf "$XITERM_TAB" > {result}')
+            wait_for(result.exists, "Number shortcut failed after drag")
+            assert result.read_text() == identity, f"Wrong shell in reordered slot {index}"
+        drag_tab(100, 580)  # first, second, third
+        click(750, 20)  # Close third at its new position.
+        wait_for(lambda: len(children(process.pid)) == 2, "Reordered close button did not reap its shell")
+        result = temp / "drag-close"
+        type_text(f'printf "$XITERM_TAB" > {result}')
+        wait_for(result.exists, "Closing reordered tab lost the remaining shell")
+        assert result.read_text() == "second", "Close button removed the wrong shell"
+        type_text("exit")
+        wait_for(lambda: len(children(process.pid)) == 1, "Drag cleanup did not restore the first tab")
+        time.sleep(0.3)  # Let session cleanup and the input target change finish.
         # Menu opens on right click and supports both keyboard and mouse.
         click(350, 100, 3)
         press(0xFF54); press(0xFF0D)
@@ -402,7 +444,7 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         process.wait(timeout=8)
         assert process.returncode == 0, process.stderr.read().decode()
         wait_for(lambda: all(not Path(f"/proc/{pid}").exists() for pid in child_pids), "Shell processes survived window close")
-        print(f"PASS: cd input, Up/Down history/drafts, Home/End editing, full-screen navigation, Chinese glyphs, history paging/endpoints, real PTY grow/shrink {base}/{grown}/{shrunk}, repeated font zoom/reset, SVG context menu, nested splits, seamless grid backgrounds at 15/16 px, tabs, search, save, exit/last-tab cleanup; screenshot {output}")
+        print(f"PASS: cd input, Up/Down history/drafts, Home/End editing, full-screen navigation, Chinese glyphs, history paging/endpoints, real PTY grow/shrink {base}/{grown}/{shrunk}, repeated font zoom/reset, SVG context menu, nested splits, seamless grid backgrounds at 15/16 px, tab drag/reorder/shortcuts/close, search, save, exit/last-tab cleanup; screenshot {output}")
     finally:
         if process.poll() is None:
             ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(ROOT / "artifacts/native-failure.png")

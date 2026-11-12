@@ -3,10 +3,12 @@ package app
 import (
 	"runtime"
 	"testing"
+	"time"
 	"weak"
 
 	"github.com/diiyw/xiterm/assets"
 	"github.com/onix-engine/onix/text"
+	"github.com/onix-engine/onix/window"
 )
 
 func TestZoomReleasesOldGlyphCaches(t *testing.T) {
@@ -44,4 +46,24 @@ func TestZoomReleasesOldGlyphCaches(t *testing.T) {
 		t.Fatal("unchanged font size recreated the cache")
 	}
 	runtime.KeepAlive(a)
+}
+
+func TestIdleTrimIsScheduledDespiteBlinkAndRunsOutsidePainting(t *testing.T) {
+	a := &App{win: &window.Context{}}
+	calls := 0
+	a.trimRenderBuffers = func() error { calls++; return nil }
+	now := time.Now()
+	a.scheduleMemoryTrim(now)
+	if deadline, idle := a.idleDeadline(); !idle || deadline != now.Add(memoryTrimDelay) {
+		t.Fatal("idle loop did not schedule memory cleanup")
+	}
+	if err := a.trimIdleMemory(now.Add(time.Second)); err != nil || calls != 0 {
+		t.Fatal("memory was trimmed before the idle deadline")
+	}
+	if err := a.trimIdleMemory(now.Add(memoryTrimDelay)); err != nil || calls != 1 || !a.bufferTrimAt.IsZero() {
+		t.Fatal("idle trim did not run exactly once")
+	}
+	if err := a.trimIdleMemory(now.Add(time.Minute)); err != nil || calls != 1 {
+		t.Fatal("idle cleanup kept running without new activity")
+	}
 }

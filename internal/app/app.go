@@ -19,6 +19,7 @@ import (
 	"github.com/diiyw/xiterm/internal/workspace"
 	"github.com/onix-engine/onix/graphics"
 	"github.com/onix-engine/onix/input"
+	"github.com/onix-engine/onix/render"
 	"github.com/onix-engine/onix/text"
 	"github.com/onix-engine/onix/window"
 	iconpng "github.com/onix-engine/onix/window/codec/png"
@@ -43,47 +44,52 @@ type pollPane struct {
 }
 
 type App struct {
-	textInput        textInputState
-	logo             *graphics.Texture
-	icons            map[string]*graphics.Texture
-	keyModifiers     func(input.KeyCode) (uv.KeyMod, bool)
-	nerdFont         *text.Font
-	uiFont           *text.Font
-	mousePane        *workspace.Pane
-	dragSplit        *workspace.Node
-	lastTitle        string
-	lastSessionTitle string
-	mouseX, mouseY   float32
-	win              *window.Context
-	cfg              config.Config
-	configPath       string
-	tabs             []*workspace.Tab
-	active           int
-	paint            painter
-	font, boldFont   *text.Font
-	buttons          []button
-	keys             map[input.KeyCode]bool
-	search           bool
-	query            string
-	matches          []terminal.Match
-	matchIndex       int
-	searchRevision   uint64
-	searchSession    *terminal.Session
-	overlay          string
-	menu             bool
-	menuX, menuY     float32
-	menuIndex        int
-	notice           string
-	noticeUntil      time.Time
-	dragPane         *workspace.Pane
-	width, height    float32
-	dirty            bool
-	blink            bool
-	blinkAt          time.Time
-	paintAt          time.Time
-	pollOffset       int
-	pollPanes        []pollPane
-	smokeDeadline    time.Time
+	textInput         textInputState
+	logo              *graphics.Texture
+	icons             map[string]*graphics.Texture
+	keyModifiers      func(input.KeyCode) (uv.KeyMod, bool)
+	nerdFont          *text.Font
+	uiFont            *text.Font
+	mousePane         *workspace.Pane
+	dragSplit         *workspace.Node
+	tabDrag           tabDragState
+	lastTitle         string
+	lastSessionTitle  string
+	mouseX, mouseY    float32
+	win               *window.Context
+	cfg               config.Config
+	configPath        string
+	tabs              []*workspace.Tab
+	active            int
+	paint             painter
+	font, boldFont    *text.Font
+	buttons           []button
+	keys              map[input.KeyCode]bool
+	search            bool
+	query             string
+	historyBudget     *terminal.HistoryBudget
+	searchIndex       terminal.SearchIndex
+	bufferTrimAt      time.Time
+	trimRenderBuffers func() error
+	matches           []terminal.Match
+	matchIndex        int
+	searchRevision    uint64
+	searchSession     *terminal.Session
+	overlay           string
+	menu              bool
+	menuX, menuY      float32
+	menuIndex         int
+	notice            string
+	noticeUntil       time.Time
+	dragPane          *workspace.Pane
+	width, height     float32
+	dirty             bool
+	blink             bool
+	blinkAt           time.Time
+	paintAt           time.Time
+	pollOffset        int
+	pollPanes         []pollPane
+	smokeDeadline     time.Time
 }
 
 type Options struct {
@@ -99,6 +105,8 @@ func Run(opts Options) error {
 	a := &App{cfg: opts.Config, configPath: opts.ConfigPath, keys: map[input.KeyCode]bool{}, dirty: true, matchIndex: -1}
 	a.win = window.NewContext(a.cfg.Width, a.cfg.Height, "XiTerm", window.DefaultOptions())
 	defer a.win.Destroy()
+	a.trimRenderBuffers = render.ActiveDevice().TrimIdleBuffers
+	a.historyBudget = terminal.NewHistoryBudget(64 << 20)
 	a.paint.solid = graphics.CreateTextureByColor(graphics.White)
 	defer a.paint.solid.Dispose()
 	a.win.SetIconDecoder(iconpng.Decoder{})
@@ -183,11 +191,15 @@ func Run(opts Options) error {
 		if a.win.TakeFrameRequest() {
 			a.dirty = true
 		}
+		if err := a.trimIdleMemory(time.Now()); err != nil {
+			return false, err
+		}
 		a.advanceTimers(time.Now())
 		w, h := a.win.GetViewport()
 		if a.width != float32(w) || a.height != float32(h) {
 			a.width = float32(w)
 			a.height = float32(h)
+			a.scheduleMemoryTrim(time.Now())
 			a.dirty = true
 		}
 		if !a.frameReady(time.Now()) {
@@ -232,7 +244,7 @@ func (a *App) idleDeadline() (time.Time, bool) {
 			deadline = a.blinkAt
 		}
 	}
-	for _, next := range []time.Time{a.noticeUntil, a.smokeDeadline} {
+	for _, next := range []time.Time{a.noticeUntil, a.smokeDeadline, a.bufferTrimAt} {
 		if !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
 			deadline = next
 		}
@@ -272,6 +284,7 @@ func (a *App) setFontSize(size int) {
 		return
 	}
 	a.paint.disposeGlyphCaches()
+	a.scheduleMemoryTrim(time.Now())
 	a.paint.size = float32(a.cfg.FontSize)
 	// Standalone caches own their atlases, so old sizes are released on zoom
 	// instead of accumulating in Font's cache for the process lifetime.
@@ -307,6 +320,8 @@ func (a *App) newPane(p config.Profile) (*workspace.Pane, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.SetHistoryBudget(a.historyBudget)
+	a.scheduleMemoryTrim(time.Now())
 	return &workspace.Pane{Session: s}, nil
 }
 func (a *App) newTab(p config.Profile) error {
@@ -315,6 +330,7 @@ func (a *App) newTab(p config.Profile) error {
 		return err
 	}
 	a.tabs = append(a.tabs, &workspace.Tab{Root: workspace.Leaf(pane), Active: pane})
+	a.endTabDrag()
 	a.active = len(a.tabs) - 1
 	a.resetSearch()
 	a.dirty = true
@@ -352,6 +368,7 @@ func (a *App) closePaneAt(index int, p *workspace.Pane) {
 		return
 	}
 	t := a.tabs[index]
+	a.endTabDrag()
 	p.Session.Close()
 	t.Root = t.Root.Remove(p)
 	if t.Root == nil {
@@ -377,6 +394,7 @@ func (a *App) closeTab(index int) {
 	if index < 0 || index >= len(a.tabs) {
 		return
 	}
+	a.endTabDrag()
 	a.tabs[index].Root.Visit(func(p *workspace.Pane) { p.Session.Close() })
 	a.tabs = slices.Delete(a.tabs, index, index+1)
 	if len(a.tabs) == 0 {
@@ -418,6 +436,7 @@ func (a *App) poll() {
 				p.Scroll += max(0, p.Session.HistoryLen()-history)
 			}
 			a.dirty = true
+			a.scheduleMemoryTrim(time.Now())
 			p.Scroll = min(p.Scroll, p.Session.HistoryLen())
 			if a.dragPane != p {
 				p.Selected = false
@@ -430,6 +449,9 @@ func (a *App) poll() {
 	}
 	// Remove exited sessions after polling so slice mutations cannot skip a tab.
 	for _, p := range panes {
+		// Another pane's output can evict rows through the shared budget even
+		// when this session had no output of its own.
+		p.pane.Scroll = min(p.pane.Scroll, p.pane.Session.HistoryLen())
 		if !p.pane.Session.Exited {
 			a.handleTransfer(p.pane.Session)
 		}
@@ -485,6 +507,7 @@ func (a *App) paneHeaderHeight(p *workspace.Pane) float32 {
 func (a *App) resetSearch() {
 	a.searchSession = nil
 	a.matches = nil
+	a.searchIndex.Clear()
 	a.matchIndex = -1
 	a.dirty = true
 }
@@ -493,13 +516,13 @@ func (a *App) updateSearch(jump bool) {
 	if p == nil {
 		return
 	}
-	a.matches = p.Session.FindInto(a.matches, a.query)
+	p.Session.IndexSearch(&a.searchIndex, a.query)
 	a.searchRevision = p.Session.Revision
 	a.searchSession = p.Session
-	if len(a.matches) == 0 {
+	if a.searchIndex.Count() == 0 {
 		a.matchIndex = -1
-	} else if a.matchIndex < 0 || a.matchIndex >= len(a.matches) {
-		a.matchIndex = len(a.matches) - 1
+	} else if a.matchIndex < 0 || a.matchIndex >= a.searchIndex.Count() {
+		a.matchIndex = a.searchIndex.Count() - 1
 	}
 	if jump {
 		a.revealMatch()
@@ -507,25 +530,29 @@ func (a *App) updateSearch(jump bool) {
 	a.dirty = true
 }
 func (a *App) revealMatch() {
-	if a.matchIndex < 0 || a.matchIndex >= len(a.matches) {
+	if a.matchIndex < 0 || a.matchIndex >= a.searchIndex.Count() {
 		return
 	}
 	p := a.pane()
-	m := a.matches[a.matchIndex]
+	m, ok := a.searchIndex.Match(p.Session, a.matchIndex)
+	if !ok {
+		return
+	}
 	p.Scroll = max(0, min(p.Session.HistoryLen(), p.Session.HistoryLen()-m.Row+p.Session.Term.Height()/2))
 	a.dirty = true
 }
 func (a *App) nextMatch(delta int) {
-	if len(a.matches) == 0 {
+	if a.searchIndex.Count() == 0 {
 		return
 	}
-	a.matchIndex = (a.matchIndex + delta + len(a.matches)) % len(a.matches)
+	a.matchIndex = (a.matchIndex + delta + a.searchIndex.Count()) % a.searchIndex.Count()
 	a.revealMatch()
 }
 func (a *App) switchTab(index int) {
 	if index < 0 || index >= len(a.tabs) {
 		return
 	}
+	a.endTabDrag()
 	a.active = index
 	a.dragPane = nil
 	a.dragSplit = nil

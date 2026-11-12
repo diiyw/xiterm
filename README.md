@@ -6,7 +6,7 @@
 
 ## 运行
 
-需要 Go **1.27+**、CGO 和 C/C++ 工具链。当前已在 Linux/X11 下验证，并通过 Windows amd64 交叉编译。Windows 使用 ConPTY（要求 Windows 10 1809+），默认运行 `COMSPEC` 指定的 shell，通常为 `cmd.exe /Q`。macOS / Windows 的原生构建和安装包验证由 GitHub Actions 对应 runner 执行。
+需要 Go **1.27+**、CGO 和 C/C++ 工具链。当前已在 Linux/X11、macOS arm64 下完成原生构建和窗口验证，并通过 Windows amd64 交叉编译。Windows 使用 ConPTY（要求 Windows 10 1809+），默认运行 `COMSPEC` 指定的 shell，通常为 `cmd.exe /Q`。各平台安装包的持续验证由 GitHub Actions 对应 runner 执行。
 
 Debian / Ubuntu 安装原生依赖：
 
@@ -141,7 +141,7 @@ Linux 默认为 `~/.config/xiterm/config.json`（遵循 `XDG_CONFIG_HOME`）；m
 
 将示例的 shell 和目录替换为本机路径；目录和环境变量不会进行 shell 展开。可选的 `font_path` 指向本机 TTF/OTF 字体。修改配置文件后重启生效；设置面板中的字号立即生效，点击保存后持久化。
 
-`scrollback` 是每个面板保留的最大历史行数，设为 `0` 可关闭历史。主屏幕历史采用紧凑的环形存储，共享同一行内的样式。仅绘制当前视口，按需展开可见历史行；滚出视口、返回实时输出或隐藏标签页时释放展开缓存，搜索和复制直接读取紧凑数据。每个面板的紧凑历史数据另有 **32 MiB** 上限；行数或内存达到上限时，优先淘汰最旧的历史，持续输出不会无限累积历史数据。
+`scrollback` 是每个面板保留的最大历史行数，设为 `0` 可关闭历史。主屏幕历史采用紧凑的环形存储：普通 ASCII 行只存文本，Unicode 行保留压缩列信息，样式按连续区间共享，环形索引按需增长。历史行直接压缩，不产生完整单元格行的临时副本。仅绘制当前视口，按需展开可见历史行；滚出视口、返回实时输出或隐藏标签页时释放展开缓存，搜索和复制直接读取紧凑数据。每个面板的紧凑历史数据有 **32 MiB** 上限，所有标签和分屏共享 **64 MiB** 总上限；行数或内存达到上限时，优先淘汰最旧的历史。备用屏幕不保留历史。
 
 新标签页 / 分屏继承当前 profile 和已报告的本地目录。shell 未发送 OSC 7 时，目录保持为 profile 的起始目录。zsh 可在 `.zshrc` 中加入：
 
@@ -167,11 +167,13 @@ go test -race ./assets ./internal/config ./internal/terminal ./internal/workspac
 
 安装 `lrzsz` 后，测试还会验证真实 ZMODEM 上传 / 下载、二进制内容、中文文件名、多文件、同名文件保留、取消及传输后的 shell 输入；未安装时跳过这些集成用例。
 
-分配回归覆盖空闲轮询、菜单命中、面板查询、Unicode 搜索，以及终端、搜索、菜单和设置等界面的绘制指令生成。稳定布局、查询容量和字形缓存预热后，这些路径可达到 `0 B/op`、`0 allocs/op`；绘制分配测试使用 CPU Canvas，真实窗口另由原生测试验证。`Session.FindInto` 复用调用方的匹配切片，`Find` 仍返回独立持有的结果。PTY 收发复用有界缓冲块，关闭会话时释放；每会话最多保留 66 个 32 KiB 输出块和 66 个 1 KiB 输入块。VT 解析、新历史行、首次字形加载和容量增长仍可能分配。
+分配回归覆盖空闲轮询、菜单命中、面板查询、Unicode 搜索，以及终端、搜索、菜单和设置等界面的绘制指令生成。稳定布局、查询容量和字形缓存预热后，这些路径可达到 `0 B/op`、`0 allocs/op`；绘制分配测试使用 CPU Canvas，真实窗口另由原生测试验证。界面搜索按行保存累计匹配数，只为可见区域生成高亮结果，保留完整结果计数和上下导航；`Session.FindInto` / `Find` 仍提供完整结果列表。
+
+PTY 输出队列最多 16 块，输出池最多缓存 18 个 32 KiB 块；输入和传输协议队列保持原容量。空闲 2 秒后输出池保留两个预热块，并释放较大的已完成解析缓冲、字体 CPU 缓存、系统字体回退缓存和 Metal 临时 GPU 缓冲。VT 控制字符串缓冲从 64 KiB 按需增长到 4 MiB，不丢弃尚未完成的分段序列。macOS 使用两个 Metal 在途帧及 drawable，保持原始 Retina 分辨率。VT 解析、新历史行、首次字形加载和容量增长仍可能分配。实现细节、测量结果及平台验证范围见 [内存优化记录](docs/memory-optimization.md)。
 
 ```sh
 go test ./internal/app -run '^$' -bench 'Benchmark(IdlePoll|MenuHitTest|WarmDraw)' -benchmem
-go test ./internal/terminal -run '^$' -bench 'Benchmark(FindHistoryInto|IOBlockReuse|PackHistoryLine|ContinuousOutput)' -benchmem
+go test ./internal/terminal -run '^$' -bench 'Benchmark(FindHistoryInto|IndexedSearchDense|IOBlockReuse|PackHistoryLine|ContinuousOutput)' -benchmem
 ```
 
 原生窗口检查（Linux，需要 `xvfb`；完整检查还需要 `libxtst6` 和 Python Pillow）：
@@ -196,12 +198,12 @@ make native-test
 
 当前限制：历史按终端行存储，缩放不重排旧行；选择和搜索按物理行工作。尚未实现 IME 预编辑文字的绘制，以及复杂 emoji / ZWJ 字形塑形、完整终端协议一致性测试。关闭活动面板会结束其会话，没有未结束任务确认流程。
 
-Onix 版本固定为 [`v0.1.2`](https://github.com/onix-engine/onix/releases/tag/v0.1.2)（`9e88d1c2091e`），可独立通过 Go modules 构建，无需本机 Onix checkout。PTY 使用 `creack/pty` / `charmbracelet/x/conpty`，VT 解析使用 `charmbracelet/x/vt`；依赖版本记录在 `go.mod` / `go.sum`。Nerd Font 许可见 `assets/fonts/LICENSE.txt` 和 `assets/fonts/NERD-FONTS-LICENSE.txt`。
+Onix 以 [`v0.1.5`](https://github.com/onix-engine/onix/releases/tag/v0.1.5)（`5967841f067b`）为基础；Onix 和 `charmbracelet/x/vt v0.1.0` 的内存补丁随仓库存放在 [`third_party`](third_party/README.md)，由 `go.mod` 的本地替换固定，无需本机 Onix checkout。PTY 使用 `creack/pty` / `charmbracelet/x/conpty`；依赖版本记录在 `go.mod` / `go.sum`。Nerd Font 许可见 `assets/fonts/LICENSE.txt` 和 `assets/fonts/NERD-FONTS-LICENSE.txt`。
 
 
 ## Tag 自动打包
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) 在推送 `vMAJOR.MINOR.PATCH` tag 后构建安装包，全部构建和测试通过后上传到对应 GitHub Release：
+[`.github/workflows/release.yml`](.github/workflows/release.yml) 在推送 `vMAJOR.MINOR.PATCH` tag 后构建安装包，全部构建和测试通过后上传到对应 GitHub Release（v0.1.5 按发布要求跳过测试，仅构建和校验产物）：
 
 | 平台 | 架构 | 产物 |
 | --- | --- | --- |

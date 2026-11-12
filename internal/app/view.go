@@ -3,7 +3,6 @@ package app
 import (
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"time"
 
@@ -28,31 +27,24 @@ func (a *App) draw() {
 	p.rect(workspace.Rect{W: a.width, H: tabsH}, chrome)
 	p.canvas.BindTexture(a.logo)
 	p.canvas.DrawAffine([6]float32{24, 0, 12, 0, 24, 9}, [6]float32{1, 0, 0, 0, 1, 0}, 1)
-	const tabStart float32 = 48
-	tabWidth := min(float32(240), max(float32(40), (a.width-tabStart-44)/float32(max(1, len(a.tabs)))))
 	for i, t := range a.tabs {
 		if i != a.active {
 			t.Root.Visit(func(pane *workspace.Pane) { pane.Session.SetViewport(0, 0) })
 		}
-		r := workspace.Rect{X: tabStart + float32(i)*tabWidth, W: tabWidth, H: tabsH}
-		if i == a.active {
-			p.rect(r, background)
-			p.rect(workspace.Rect{X: r.X + 10, Y: r.H - 2, W: r.W - 20, H: 2}, accent)
+		if t != a.tabDrag.tab || !a.tabDrag.moving {
+			a.drawTab(i, a.tabRect(i))
 		}
-		title := t.Active.Session.Title
-		var number [32]byte
-		var suffix string
-		if count := t.Root.PaneCount(); count > 1 {
-			buf := append(number[:0], " · "...)
-			suffix = string(strconv.AppendInt(buf, int64(count), 10))
-		}
-		p.canvas.PushClipRect(r.X, r.Y, r.W-32, r.H)
-		p.fittedLabel(max(0, r.W-48), r.X+14, 12, foreground, title, suffix)
-		p.canvas.PopClipRect()
-		a.buttons = append(a.buttons, button{rect: r, action: actionSwitchTab, value: i})
-		a.addIconButton("close", workspace.Rect{X: r.X + r.W - 32, Y: 5, W: 28, H: 32}, actionCloseTab, i)
 	}
-	a.addIconButton("plus", workspace.Rect{X: tabStart + float32(len(a.tabs))*tabWidth + 4, Y: 5, W: 32, H: 32}, actionNewTab, 0)
+	if a.tabDrag.moving {
+		// Draw the grabbed tab last so it slides above its neighbors.
+		for i, t := range a.tabs {
+			if t == a.tabDrag.tab {
+				a.drawTab(i, a.draggedTabRect())
+				break
+			}
+		}
+	}
+	a.addIconButton("plus", workspace.Rect{X: tabStart + float32(len(a.tabs))*a.tabWidth() + 4, Y: 5, W: 32, H: 32}, actionNewTab, 0)
 	if a.search {
 		a.drawSearch()
 	}
@@ -70,6 +62,26 @@ func (a *App) draw() {
 		a.drawContextMenu()
 	}
 }
+func (a *App) drawTab(index int, r workspace.Rect) {
+	p := &a.paint
+	t := a.tabs[index]
+	if index == a.active {
+		p.rect(r, background)
+		p.rect(workspace.Rect{X: r.X + 10, Y: r.H - 2, W: r.W - 20, H: 2}, accent)
+	}
+	title := t.Active.Session.Title
+	var number [32]byte
+	var suffix string
+	if count := t.Root.PaneCount(); count > 1 {
+		buf := append(number[:0], " · "...)
+		suffix = string(strconv.AppendInt(buf, int64(count), 10))
+	}
+	p.canvas.PushClipRect(r.X, r.Y, r.W-32, r.H)
+	p.fittedLabel(max(0, r.W-48), r.X+14, 12, foreground, title, suffix)
+	p.canvas.PopClipRect()
+	a.buttons = append(a.buttons, button{rect: r, action: actionSwitchTab, value: index})
+	a.addIconButton("close", workspace.Rect{X: r.X + r.W - 32, Y: 5, W: 28, H: 32}, actionCloseTab, index)
+}
 func (a *App) drawSearch() {
 	y := tabsH
 	p := &a.paint
@@ -84,10 +96,10 @@ func (a *App) drawSearch() {
 	p.canvas.PopClipRect()
 	count := "No matches"
 	var number [64]byte
-	if len(a.matches) > 0 {
+	if a.searchIndex.Count() > 0 {
 		buf := strconv.AppendInt(number[:0], int64(a.matchIndex+1), 10)
 		buf = append(buf, " / "...)
-		count = string(strconv.AppendInt(buf, int64(len(a.matches)), 10))
+		count = string(strconv.AppendInt(buf, int64(a.searchIndex.Count()), 10))
 	}
 	p.label(count, a.width-250, y+10, muted, false)
 	a.addIconButton("up", workspace.Rect{X: a.width - 150, Y: y + 3, W: 55, H: 32}, actionNextMatch, -1)
@@ -165,9 +177,8 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 	s.SetViewport(start, rows)
 	var visibleMatches []terminal.Match
 	if a.search && active {
-		first, _ := slices.BinarySearchFunc(a.matches, start, matchRow)
-		last, _ := slices.BinarySearchFunc(a.matches, start+rows, matchRow)
-		visibleMatches = a.matches[first:last]
+		a.matches = a.searchIndex.VisibleInto(s, a.matches, start, rows)
+		visibleMatches = a.matches
 	}
 	x0, y0 := r.X+12, r.Y+headerH+8
 	defaultBG := fromColor(s.Term.BackgroundColor(), background)
@@ -230,9 +241,6 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 	}
 }
 
-func matchRow(m terminal.Match, row int) int {
-	return m.Row - row
-}
 func (a *App) drawNotice() {
 	if !time.Now().Before(a.noticeUntil) {
 		return

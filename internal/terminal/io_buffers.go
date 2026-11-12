@@ -2,6 +2,7 @@ package terminal
 
 const (
 	ioQueueSize     = 64
+	outputQueueSize = 16
 	outputBlockSize = 32768
 	inputBlockSize  = 1024
 )
@@ -15,7 +16,11 @@ type bytePool struct {
 }
 
 func newBytePool(size int) bytePool {
-	return bytePool{size: size, free: make(chan []byte, ioQueueSize+2)}
+	queue := ioQueueSize
+	if size == outputBlockSize {
+		queue = outputQueueSize
+	}
+	return bytePool{size: size, free: make(chan []byte, queue+2)}
 }
 
 func (p *bytePool) get() []byte {
@@ -44,5 +49,33 @@ func (p *bytePool) clear() {
 		default:
 			return
 		}
+	}
+}
+
+// trim retains a small warm working set after the output burst ends. Channel
+// operations allow the reader to borrow or return blocks concurrently.
+func (p *bytePool) trim(keep int) {
+	for len(p.free) > keep {
+		select {
+		case <-p.free:
+		default:
+			return
+		}
+	}
+}
+
+// TrimIdleBuffers is called by the UI only after the session has no queued
+// output. It preserves incomplete escape sequences and a small I/O working set.
+func (s *Session) TrimIdleBuffers() {
+	if s.PendingOutput() {
+		return
+	}
+	s.outputPool.trim(2)
+	s.Term.TrimBuffers()
+	if cap(s.findLine) > 4096 {
+		s.findLine = nil
+	}
+	if cap(s.findColumns) > 4096 {
+		s.findColumns = nil
 	}
 }

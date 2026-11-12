@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Render Backend Tests</title>
+<pre id="output"></pre>
+<script src="wasm_exec.js"></script>
+<script src="webgpu.js"></script>
+<script>
+const output = document.getElementById("output");
+const log = console.log;
+console.log = (...values) => { output.textContent += values.join(" ") + "\n"; log(...values); };
+const go = new Go();
+go.argv = ["render.test", "-test.run=TestBrowser.*Pixels", "-test.v"];
+go.exit = code => { document.title = code === 0 ? "PASS" : "FAIL"; };
+WebAssembly.instantiateStreaming(fetch(new URLSearchParams(location.search).get("wasm") || "render.test.wasm"), go.importObject)
+    .then(result => go.run(result.instance))
+    .catch(error => { output.textContent += String(error); document.title = "FAIL"; });
+</script>

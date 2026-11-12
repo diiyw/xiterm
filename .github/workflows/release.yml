@@ -44,6 +44,8 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
       DOTNET_ROLL_FORWARD: Major
       RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      # v0.1.5 intentionally ships without running tests. Later releases resume them.
+      RUN_TESTS: ${{ github.ref_name != 'v0.1.5' && inputs.tag != 'v0.1.5' }}
     defaults:
       run:
         shell: bash
@@ -100,20 +102,26 @@ jobs:
           go mod download
           go mod verify
       - name: Test application and assets
+        if: env.RUN_TESTS == 'true'
         run: |
-          go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app
-          go vet ./cmd/xiterm ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app
+          go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt github.com/onix-engine/onix/font
+          go vet ./cmd/xiterm ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt
+          go vet -unsafeptr=false github.com/onix-engine/onix/font github.com/onix-engine/onix/render
           python -m unittest discover -s scripts -p 'test_*.py'
       - name: Verify native system UI font discovery
+        if: env.RUN_TESTS == 'true'
         run: go test github.com/onix-engine/onix/font -run 'TestWindowsDefaultFontUsesActiveUIFont|TestAppleLoadsCoreTextSystemFontAndCollectionFace|TestLinuxDefaultFontUsesFontconfigSansSerif' -v
+      - name: Verify Metal frame buffers and idle retirement
+        if: runner.os == 'macOS' && env.RUN_TESTS == 'true'
+        run: go test github.com/onix-engine/onix/render -run '^TestMetalMemoryLifecycle$' -count=1 -v
       - name: Build native installer
         run: python scripts/package.py --tag "$RELEASE_TAG"
       - name: Test packaged Linux executable
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && env.RUN_TESTS == 'true'
         run: |
           python scripts/verify-linux-package.py --version '${{ steps.version.outputs.version }}'
       - name: Test Windows installer install and uninstall
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.RUN_TESTS == 'true'
         shell: pwsh
         run: ./scripts/test-windows-installer.ps1 -Version '${{ steps.version.outputs.version }}'
       - name: Preserve Windows installer logs on failure

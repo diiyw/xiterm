@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -74,6 +75,7 @@ func (a *App) mods() uv.KeyMod {
 func (a *App) bindInput() {
 	a.win.OnTextComposition(a.textComposition)
 	a.win.OnKeydown(func(key input.KeyCode) {
+		a.scheduleMemoryTrim(time.Now())
 		if a.keyModifiers != nil && key != input.KeyCapsLock && (key < input.KeyLeftShift || key > input.KeyRightSuper) {
 			if mods, ok := a.keyModifiers(key); ok {
 				a.syncModifiers(mods)
@@ -86,6 +88,7 @@ func (a *App) bindInput() {
 	})
 	a.win.OnKeyup(func(key input.KeyCode) { delete(a.keys, key) })
 	a.win.OnTextInput(func(value string) {
+		a.scheduleMemoryTrim(time.Now())
 		if a.ctrl() || a.super() || a.overlay != "" {
 			return
 		}
@@ -106,6 +109,7 @@ func (a *App) bindInput() {
 		a.blink = false
 	})
 	a.win.OnTextCommand(func(command input.TextCommand) {
+		a.scheduleMemoryTrim(time.Now())
 		if a.menu {
 			if command == input.TextCommandEnter {
 				a.activateMenu(a.menuIndex)
@@ -151,46 +155,15 @@ func (a *App) bindInput() {
 		}
 		a.dirty = true
 	})
-	a.win.OnMouseDown(func(x, y float64, b input.MouseButton) { a.mouseDown(float32(x), float32(y), b) })
-	a.win.OnMouseMove(func(x, y float64) {
-		a.mouseX, a.mouseY = float32(x), float32(y)
-		a.dirty = true
-		if a.menu {
-			a.menuIndex = a.menuItemAt(float32(x), float32(y))
-			return
-		}
-		if a.dragSplit != nil {
-			a.dragSplit.DragDivider(float32(x), float32(y))
-			a.dirty = true
-			return
-		}
-		if a.mousePane != nil {
-			event := a.mouseEvent(a.mousePane, float32(x), float32(y), uv.MouseLeft)
-			a.mousePane.Session.SendMouse(uv.MouseMotionEvent(event))
-			return
-		}
-		if pane := a.pane(); pane != nil && a.overlay == "" && !a.search && pane.Session.MouseTracking && !a.shift() && pane.Bounds.Contains(float32(x), float32(y)) {
-			pane.Session.SendMouse(uv.MouseMotionEvent(a.mouseEvent(pane, float32(x), float32(y), uv.MouseNone)))
-			return
-		}
-		if a.dragPane != nil {
-			a.dragPane.SelectionEnd = a.position(a.dragPane, float32(x), float32(y))
-			a.dragPane.Selected = a.dragPane.SelectionStart != a.dragPane.SelectionEnd
-			a.dirty = true
-		}
+	a.win.OnMouseDown(func(x, y float64, b input.MouseButton) {
+		a.scheduleMemoryTrim(time.Now())
+		a.mouseDown(float32(x), float32(y), b)
 	})
-	a.win.OnMouseUp(func(x, y float64, b input.MouseButton) {
-		if a.mousePane != nil {
-			a.mousePane.Session.SendMouse(uv.MouseReleaseEvent(a.mouseEvent(a.mousePane, float32(x), float32(y), uv.MouseLeft)))
-			a.mousePane = nil
-		}
-		if b == input.MouseLeft {
-			a.dragPane = nil
-			a.dragSplit = nil
-		}
-	})
+	a.win.OnMouseMove(func(x, y float64) { a.mouseMove(float32(x), float32(y)) })
+	a.win.OnMouseUp(func(x, y float64, b input.MouseButton) { a.mouseUp(float32(x), float32(y), b) })
 	a.win.OnMouseWheel(func(_, dy float64) {
-		if a.overlay != "" || a.search || a.menu {
+		a.scheduleMemoryTrim(time.Now())
+		if a.overlay != "" || a.search || a.menu || a.tabDrag.tab != nil {
 			return
 		}
 		if p := a.pane(); p != nil {
@@ -232,7 +205,8 @@ func (a *App) bindInput() {
 
 func (a *App) keydown(key input.KeyCode) {
 	if key == input.KeyEscape {
-		dismissing := a.search || a.overlay != "" || a.menu
+		dismissing := a.search || a.overlay != "" || a.menu || a.tabDrag.tab != nil
+		a.endTabDrag()
 		a.menu = false
 		a.search = false
 		a.resetSearch()
@@ -501,6 +475,7 @@ func (a *App) position(p *workspace.Pane, x, y float32) terminal.Position {
 }
 func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 	a.dirty = true
+	a.endTabDrag()
 	if b == input.MouseRight {
 		if a.overlay != "" {
 			return
@@ -530,7 +505,11 @@ func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 	}
 	for i := len(a.buttons) - 1; i >= 0; i-- {
 		if a.buttons[i].rect.Contains(x, y) {
-			a.activateButton(a.buttons[i].action, a.buttons[i].value)
+			button := a.buttons[i]
+			a.activateButton(button.action, button.value)
+			if button.action == actionSwitchTab {
+				a.beginTabDrag(button.value, x)
+			}
 			return
 		}
 	}
@@ -626,4 +605,52 @@ func modifiedSequence(key input.KeyCode, mods uv.KeyMod) string {
 		return ""
 	}
 	return modifiedSequences[parameter-1][index]
+}
+
+func (a *App) mouseMove(x, y float32) {
+	a.mouseX, a.mouseY = x, y
+	a.dirty = true
+	if a.tabDrag.tab != nil {
+		a.moveTabDrag(x)
+		return
+	}
+	if a.menu {
+		a.menuIndex = a.menuItemAt(x, y)
+		return
+	}
+	if a.dragSplit != nil {
+		a.dragSplit.DragDivider(x, y)
+		a.dirty = true
+		return
+	}
+	if a.mousePane != nil {
+		event := a.mouseEvent(a.mousePane, x, y, uv.MouseLeft)
+		a.mousePane.Session.SendMouse(uv.MouseMotionEvent(event))
+		return
+	}
+	if pane := a.pane(); pane != nil && a.overlay == "" && !a.search && pane.Session.MouseTracking && !a.shift() && pane.Bounds.Contains(x, y) {
+		pane.Session.SendMouse(uv.MouseMotionEvent(a.mouseEvent(pane, x, y, uv.MouseNone)))
+		return
+	}
+	if a.dragPane != nil {
+		a.dragPane.SelectionEnd = a.position(a.dragPane, x, y)
+		a.dragPane.Selected = a.dragPane.SelectionStart != a.dragPane.SelectionEnd
+		a.dirty = true
+	}
+}
+
+func (a *App) mouseUp(x, y float32, b input.MouseButton) {
+	a.scheduleMemoryTrim(time.Now())
+	if a.mousePane != nil {
+		a.mousePane.Session.SendMouse(uv.MouseReleaseEvent(a.mouseEvent(a.mousePane, x, y, uv.MouseLeft)))
+		a.mousePane = nil
+	}
+	if b == input.MouseLeft {
+		if a.tabDrag.tab != nil {
+			a.moveTabDrag(x)
+			a.endTabDrag()
+		}
+		a.dragPane = nil
+		a.dragSplit = nil
+	}
 }

@@ -69,7 +69,7 @@ func TestWarmDrawDoesNotAllocate(t *testing.T) {
 			switch mode {
 			case "search":
 				a.search, a.query = true, "中文"
-				a.matches = a.pane().Session.FindInto(a.matches, a.query)
+				a.pane().Session.IndexSearch(&a.searchIndex, a.query)
 			case "menu":
 				a.menu = true
 			case "notice":
@@ -96,7 +96,7 @@ func TestWarmDrawDoesNotAllocate(t *testing.T) {
 func BenchmarkWarmDraw(b *testing.B) {
 	a := paintApp(b)
 	a.search, a.query = true, "中文"
-	a.matches = a.pane().Session.FindInto(nil, a.query)
+	a.pane().Session.IndexSearch(&a.searchIndex, a.query)
 	for range 3 {
 		a.draw()
 		_ = a.paint.canvas.FinishFrame()

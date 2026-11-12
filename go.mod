@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/charmbracelet/x/vt v0.1.0
 	github.com/creack/pty v1.1.24
-	github.com/onix-engine/onix v0.1.2
+	github.com/onix-engine/onix v0.1.5
 	golang.org/x/sys v0.49.0
 )
 
@@ -30,3 +30,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.19.0 // indirect
 )
+
+replace github.com/charmbracelet/x/vt => ./third_party/vt
+
+replace github.com/onix-engine/onix => ./third_party/onix

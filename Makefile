@@ -4,9 +4,11 @@ build:
 run:
 	go run ./cmd/xiterm
 test:
-	go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app
+	go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt github.com/onix-engine/onix/font github.com/onix-engine/onix/render
 check:
-	go vet ./assets ./cmd/xiterm ./internal/config ./internal/terminal ./internal/workspace ./internal/app
+	go vet ./assets ./cmd/xiterm ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt
+	# Native FFI handles use uintptr; exclude the pointer-cast analyzer there.
+	go vet -unsafeptr=false github.com/onix-engine/onix/font github.com/onix-engine/onix/render
 smoke: build
 	xvfb-run -a ./bin/xiterm -smoke-duration=3s
 

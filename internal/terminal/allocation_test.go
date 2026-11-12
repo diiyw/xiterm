@@ -93,7 +93,7 @@ func TestBytePoolAllocationsAndBound(t *testing.T) {
 	for range cap(p.free) + 10 {
 		p.put(make([]byte, outputBlockSize))
 	}
-	if len(p.free) != ioQueueSize+2 {
+	if len(p.free) != outputQueueSize+2 {
 		t.Fatal("pool did not enforce its retention bound")
 	}
 	p.clear()
