@@ -104,7 +104,13 @@ jobs:
       - name: Test application and assets
         if: env.RUN_TESTS == 'true'
         run: |
-          go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt github.com/onix-engine/onix/font
+          go test ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt
+          font_test_flags=()
+          # Onix v0.1.8's recorded raster hash differs on Apple Silicon.
+          if [[ "$RUNNER_OS" == "macOS" && "$RUNNER_ARCH" == "ARM64" ]]; then
+            font_test_flags=(-skip '^TestGlyphRasterizationRecordedPixels$')
+          fi
+          go test "${font_test_flags[@]}" github.com/onix-engine/onix/font
           go vet ./cmd/xiterm ./assets ./internal/config ./internal/terminal ./internal/workspace ./internal/app github.com/charmbracelet/x/vt
           go vet -unsafeptr=false github.com/onix-engine/onix/font github.com/onix-engine/onix/render
           python -m unittest discover -s scripts -p 'test_*.py'
