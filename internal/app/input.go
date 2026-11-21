@@ -89,6 +89,7 @@ func (a *App) bindInput() {
 	a.win.OnKeyup(func(key input.KeyCode) { delete(a.keys, key) })
 	a.win.OnTextInput(func(value string) {
 		a.scheduleMemoryTrim(time.Now())
+		a.textComposition(input.TextComposition{})
 		if a.ctrl() || a.super() || a.overlay != "" {
 			return
 		}
@@ -116,7 +117,7 @@ func (a *App) bindInput() {
 			}
 			return
 		}
-		if a.overlay != "" {
+		if a.overlay != "" || a.textInput.composition.Active {
 			return
 		}
 		if a.search {
@@ -204,6 +205,14 @@ func (a *App) bindInput() {
 }
 
 func (a *App) keydown(key input.KeyCode) {
+	if a.textInput.composition.Active && !a.ctrl() && !a.alt() && !a.super() {
+		switch key {
+		case input.KeyEscape, input.KeyLeft, input.KeyRight, input.KeyUp, input.KeyDown,
+			input.KeyHome, input.KeyEnd, input.KeyPageUp, input.KeyPageDown, input.KeyTab, input.KeyDelete:
+			// Some backends also forward keys that the IME uses to edit preedit or select candidates.
+			return
+		}
+	}
 	if key == input.KeyEscape {
 		dismissing := a.search || a.overlay != "" || a.menu || a.tabDrag.tab != nil
 		a.endTabDrag()
@@ -214,6 +223,7 @@ func (a *App) keydown(key input.KeyCode) {
 		a.dragPane = nil
 		a.dragSplit = nil
 		a.mousePane = nil
+		a.linkClick = linkClick{}
 		if p := a.pane(); p != nil {
 			p.Selected = false
 			if !dismissing {
@@ -474,6 +484,8 @@ func (a *App) position(p *workspace.Pane, x, y float32) terminal.Position {
 	return terminal.Position{Row: p.Session.HistoryLen() - p.Scroll + row, Col: col}
 }
 func (a *App) mouseDown(x, y float32, b input.MouseButton) {
+	a.mouseX, a.mouseY = x, y
+	a.linkClick = linkClick{}
 	a.dirty = true
 	a.endTabDrag()
 	if b == input.MouseRight {
@@ -526,7 +538,11 @@ func (a *App) mouseDown(x, y float32, b input.MouseButton) {
 			t.Active = p
 			a.resetSearch()
 			p.Selected = false
-			if p.Session.MouseTracking && !a.shift() && y >= p.Bounds.Y+a.paneHeaderHeight(p) {
+			hit := a.linkAt(x, y)
+			if hit.link.URL != "" {
+				a.linkClick = linkClick{hit: hit, x: x, y: y}
+			}
+			if p.Session.MouseTracking && !a.shift() && !(a.browserModifier() && hit.link.URL != "") && y >= p.Bounds.Y+a.paneHeaderHeight(p) {
 				a.mousePane = p
 				p.Session.SendMouse(uv.MouseClickEvent(a.mouseEvent(p, x, y, uv.MouseLeft)))
 				return
@@ -609,6 +625,10 @@ func modifiedSequence(key input.KeyCode, mods uv.KeyMod) string {
 
 func (a *App) mouseMove(x, y float32) {
 	a.mouseX, a.mouseY = x, y
+	defer a.updateLinkHover()
+	if abs(x-a.linkClick.x) > 4 || abs(y-a.linkClick.y) > 4 {
+		a.linkClick = linkClick{}
+	}
 	a.dirty = true
 	if a.tabDrag.tab != nil {
 		a.moveTabDrag(x)
@@ -628,7 +648,7 @@ func (a *App) mouseMove(x, y float32) {
 		a.mousePane.Session.SendMouse(uv.MouseMotionEvent(event))
 		return
 	}
-	if pane := a.pane(); pane != nil && a.overlay == "" && !a.search && pane.Session.MouseTracking && !a.shift() && pane.Bounds.Contains(x, y) {
+	if pane := a.pane(); pane != nil && a.dragPane == nil && a.overlay == "" && !a.search && pane.Session.MouseTracking && !a.shift() && pane.Bounds.Contains(x, y) {
 		pane.Session.SendMouse(uv.MouseMotionEvent(a.mouseEvent(pane, x, y, uv.MouseNone)))
 		return
 	}
@@ -640,17 +660,24 @@ func (a *App) mouseMove(x, y float32) {
 }
 
 func (a *App) mouseUp(x, y float32, b input.MouseButton) {
+	a.mouseX, a.mouseY = x, y
 	a.scheduleMemoryTrim(time.Now())
 	if a.mousePane != nil {
 		a.mousePane.Session.SendMouse(uv.MouseReleaseEvent(a.mouseEvent(a.mousePane, x, y, uv.MouseLeft)))
 		a.mousePane = nil
 	}
 	if b == input.MouseLeft {
+		click := a.linkClick
+		a.linkClick = linkClick{}
+		if click.hit.link.URL != "" && a.dragPane == click.hit.pane && !a.dragPane.Selected && abs(x-click.x) <= 4 && abs(y-click.y) <= 4 && a.linkAt(x, y) == click.hit {
+			a.openWebLink(click.hit.link.URL)
+		}
 		if a.tabDrag.tab != nil {
 			a.moveTabDrag(x)
 			a.endTabDrag()
 		}
 		a.dragPane = nil
 		a.dragSplit = nil
+		a.updateLinkHover()
 	}
 }

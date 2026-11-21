@@ -49,6 +49,7 @@ Linux / macOS 默认使用 `$SHELL` 和登录 shell 参数 `-l`；未设置 `$SH
 - 应用光标模式、备用屏幕、终端查询响应、括号粘贴、基础 TUI 鼠标事件。
 - JSON 配置、多 shell profiles、起始目录、自定义环境变量、自定义字体、设置保存。
 - OSC 0/2 标题、OSC 7 工作目录、文件拖入后生成带引号的路径。
+- 自动识别 HTTP / HTTPS 地址（包括 localhost、IP 和端口）及 OSC 8 网页链接，悬停显示下划线，单击用系统默认浏览器打开；支持历史输出中的链接。
 - Linux / macOS 自动识别 `rz` / `sz` 的 ZMODEM 握手，弹出文件 / 保存目录选择框，支持多文件传输和取消。
 - `exit` 或 shell 结束后自动关闭对应面板，空标签自动移除；最后一个标签关闭后退出程序，清理 shell 进程组。
 - 空闲时等待窗口事件 / PTY 输出，光标闪烁时刷新。
@@ -83,6 +84,8 @@ Linux 使用 `Ctrl+Shift`，macOS 使用 `Cmd` 作为应用快捷键前缀。`Ct
 终端中的 `↑` / `↓` 传给 shell，用于预览、选择命令历史；`Enter` 才执行选中的命令，`↓` 可返回尚未提交的输入（具体行为由 shell 决定）。搜索时输入查询，`↓` / `↑` 或 `Enter` / `Shift+Enter` 选择下一个 / 上一个匹配，`Esc` 返回终端。右键菜单提供新标签页、分屏、复制粘贴、搜索、Profiles、设置及帮助，支持上下键选择、`Enter` 确认、`Esc` 关闭。TUI 开启鼠标捕获时，按住 `Shift` 可拖动选择文本。
 
 普通屏幕中，`PageUp` / `PageDown`（或加 `Shift`）翻阅历史，`Shift+Home` / `Shift+End` 跳到最早历史 / 当前输出；`Home` / `End` 交给 shell 编辑命令行。使用备用屏幕的全屏程序会收到这些导航键及其修饰键，按程序自己的规则移动或翻页。
+
+终端中的 `http://` / `https://` 地址可直接单击打开（例如 `http://127.0.0.1:8787`），拖动链接仍然选择文字。TUI 捕获鼠标时，按住 `Ctrl`（macOS 可用 `Cmd`）单击打开链接，或按住 `Shift` 使用终端的选择和点击操作。Linux 通过 `xdg-open`、macOS 通过 `open`、Windows 通过系统默认关联打开浏览器。普通文本链接按物理行识别。
 
 ## rz / sz 文件传输
 
@@ -194,11 +197,11 @@ make native-test
 - `internal/config`：配置校验与原子保存。
 - `assets`：内嵌 Nerd Font、应用图标及许可证。
 
-后续重点：会话布局恢复、完整 shell integration、快捷键自定义、广播输入、触发器、tmux 集成、热键窗口、超链接操作、图片协议、Developer ID 签名 / 公证，以及 Windows ARM64 支持。
+后续重点：会话布局恢复、完整 shell integration、快捷键自定义、广播输入、触发器、tmux 集成、热键窗口、图片协议、Developer ID 签名 / 公证，以及 Windows ARM64 支持。
 
-当前限制：历史按终端行存储，缩放不重排旧行；选择和搜索按物理行工作。尚未实现 IME 预编辑文字的绘制，以及复杂 emoji / ZWJ 字形塑形、完整终端协议一致性测试。关闭活动面板会结束其会话，没有未结束任务确认流程。
+当前限制：历史按终端行存储，缩放不重排旧行；选择和搜索按物理行工作。尚未实现复杂 emoji / ZWJ 字形塑形和完整终端协议一致性测试。关闭活动面板会结束其会话，没有未结束任务确认流程。
 
-Onix 以 [`v0.1.5`](https://github.com/onix-engine/onix/releases/tag/v0.1.5)（`5967841f067b`）为基础；Onix 和 `charmbracelet/x/vt v0.1.0` 的内存补丁随仓库存放在 [`third_party`](third_party/README.md)，由 `go.mod` 的本地替换固定，无需本机 Onix checkout。PTY 使用 `creack/pty` / `charmbracelet/x/conpty`；依赖版本记录在 `go.mod` / `go.sum`。Nerd Font 许可见 `assets/fonts/LICENSE.txt` 和 `assets/fonts/NERD-FONTS-LICENSE.txt`。
+Onix 使用官方发布的 [`v0.1.8`](https://github.com/onix-engine/onix/releases/tag/v0.1.8)，由 Go 下载。`charmbracelet/x/vt v0.1.0` 的补丁随仓库存放在 [`third_party`](third_party/README.md)，由 `go.mod` 的本地替换固定。PTY 使用 `creack/pty` / `charmbracelet/x/conpty`。依赖版本记录在 `go.mod` / `go.sum`。Nerd Font 许可见 `assets/fonts/LICENSE.txt` 和 `assets/fonts/NERD-FONTS-LICENSE.txt`。
 
 
 ## Tag 自动打包

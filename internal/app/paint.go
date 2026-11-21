@@ -11,17 +11,6 @@ import (
 	"github.com/onix-engine/onix/text"
 )
 
-var (
-	background = rgb(0x16191f)
-	chrome     = rgb(0x1c2027)
-	surface    = rgb(0x252b35)
-	border     = rgb(0x303744)
-	foreground = rgb(0xd8dee9)
-	muted      = rgb(0x8e99ab)
-	accent     = rgb(0x98c379)
-	selection  = rgb(0x344b65)
-)
-
 func rgb(v uint32) graphics.ColorRGBA {
 	return graphics.ColorFromRGB(uint8(v>>16), uint8(v>>8), uint8(v))
 }
@@ -97,6 +86,19 @@ func (p *painter) labelWidth(value string) float32 {
 		width += p.labelCache().GlyphMetrics(r).Advance
 	}
 	return width
+}
+
+func (p *painter) preedit(value string, x, y, right float32, fg, bg graphics.ColorRGBA) {
+	width := min(p.labelWidth(value), right-x)
+	if width <= 0 {
+		return
+	}
+	line := workspace.Rect{X: x, Y: y, W: width, H: p.lineH}
+	p.rect(line, bg)
+	p.canvas.PushClipRect(line.X, line.Y, line.W, line.H)
+	p.label(value, x, y, fg, false)
+	p.canvas.PopClipRect()
+	p.rect(workspace.Rect{X: x, Y: y + min(p.size+2, p.lineH-1), W: width, H: 1}, fg)
 }
 
 func (p *painter) shortenLabel(value string, width float32) string {

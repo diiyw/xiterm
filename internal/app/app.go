@@ -44,6 +44,11 @@ type pollPane struct {
 }
 
 type App struct {
+	hoverLink         linkHit
+	linkHoverKey      linkHoverKey
+	linkClick         linkClick
+	browserOpen       func(string) error
+	browserErrors     chan error
 	textInput         textInputState
 	logo              *graphics.Texture
 	icons             map[string]*graphics.Texture
@@ -62,6 +67,7 @@ type App struct {
 	tabs              []*workspace.Tab
 	active            int
 	paint             painter
+	theme             uiTheme
 	font, boldFont    *text.Font
 	buttons           []button
 	keys              map[input.KeyCode]bool
@@ -103,6 +109,7 @@ func Run(opts Options) error {
 	runtime.LockOSThread()
 	filedialog.Register()
 	a := &App{cfg: opts.Config, configPath: opts.ConfigPath, keys: map[input.KeyCode]bool{}, dirty: true, matchIndex: -1}
+	a.setTheme(a.cfg.Theme)
 	a.win = window.NewContext(a.cfg.Width, a.cfg.Height, "XiTerm", window.DefaultOptions())
 	defer a.win.Destroy()
 	a.trimRenderBuffers = render.ActiveDevice().TrimIdleBuffers
@@ -221,7 +228,7 @@ func Run(opts Options) error {
 func (a *App) cursorCanBlink() bool {
 	p := a.pane()
 	return p != nil && !a.search && !a.menu && a.overlay == "" &&
-		p.Scroll == 0 && !p.Session.Exited && !p.Session.Term.CursorHidden()
+		a.textInput.composition.Text == "" && p.Scroll == 0 && !p.Session.Exited && !p.Session.Term.CursorHidden()
 }
 
 func (a *App) idleDeadline() (time.Time, bool) {
@@ -320,6 +327,7 @@ func (a *App) newPane(p config.Profile) (*workspace.Pane, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.ApplyTheme(config.ThemeByName(a.cfg.Theme))
 	s.SetHistoryBudget(a.historyBudget)
 	a.scheduleMemoryTrim(time.Now())
 	return &workspace.Pane{Session: s}, nil
@@ -422,6 +430,11 @@ func (a *App) notify(message string) {
 	a.dirty = true
 }
 func (a *App) poll() {
+	select {
+	case err := <-a.browserErrors:
+		a.notify("Could not open browser: " + err.Error())
+	default:
+	}
 	panes := a.pollPanes[:0]
 	for i, t := range a.tabs {
 		t.Root.Visit(func(p *workspace.Pane) { panes = append(panes, pollPane{pane: p, tab: i}) })
@@ -469,7 +482,9 @@ func (a *App) poll() {
 			a.updateSearch(false)
 		}
 		if p.Session.Title != a.lastSessionTitle || a.lastTitle == "" {
-			title := "XiTerm — " + shorten(p.Session.Title, 80)
+			// Terminal output can supply arbitrary bytes, but native titles require valid text.
+			sessionTitle := strings.ToValidUTF8(shorten(p.Session.Title, 80), "\uFFFD")
+			title := "XiTerm — " + strings.ReplaceAll(sessionTitle, "\x00", "\uFFFD")
 			if title != a.lastTitle {
 				a.win.SetTitle(title)
 				a.lastTitle = title

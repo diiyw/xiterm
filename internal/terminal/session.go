@@ -75,12 +75,7 @@ func Start(profile config.Profile, cols, rows, scrollback int, wake func()) (*Se
 	s := &Session{Term: vt.NewEmulator(cols, rows), Profile: profile, Title: profile.Name, Directory: profile.Directory, process: f, output: make(chan []byte, outputQueueSize), finished: make(chan error, 1), stop: make(chan struct{}), collectorDone: make(chan struct{}), writerDone: make(chan struct{}), readerDone: make(chan struct{}), outputPool: newBytePool(outputBlockSize)}
 	s.wake = wake
 	s.initScrollback(scrollback)
-	s.Term.SetDefaultForegroundColor(color.RGBA{R: 216, G: 222, B: 233, A: 255})
-	s.Term.SetDefaultBackgroundColor(color.RGBA{R: 22, G: 25, B: 31, A: 255})
-	palette := []uint32{0x242933, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd8dee9, 0x5c6370, 0xf28b91, 0xb3d994, 0xf2d396, 0x85c1ff, 0xdb9df2, 0x7fced8, 0xffffff}
-	for i, rgb := range palette {
-		s.Term.SetIndexedColor(i, color.RGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb), A: 255})
-	}
+	s.ApplyTheme(config.ThemeByName(config.DefaultTheme))
 	s.mouseModes = make(map[ansi.Mode]bool)
 	s.bindCallbacks()
 	// Read responses and keyboard encodings even when the child is backpressured.
@@ -570,6 +565,15 @@ func (s *Session) mouseMode(mode ansi.Mode, enabled bool) {
 func (s *Session) SendMouse(event uv.MouseEvent) {
 	if !s.Exited && !s.TransferActive() {
 		s.Term.SendMouse(event)
+	}
+}
+
+// ApplyTheme changes the terminal defaults and ANSI palette for an existing session.
+func (s *Session) ApplyTheme(theme config.Theme) {
+	s.Term.SetDefaultForegroundColor(color.RGBA{R: uint8(theme.TerminalForeground >> 16), G: uint8(theme.TerminalForeground >> 8), B: uint8(theme.TerminalForeground), A: 255})
+	s.Term.SetDefaultBackgroundColor(color.RGBA{R: uint8(theme.TerminalBackground >> 16), G: uint8(theme.TerminalBackground >> 8), B: uint8(theme.TerminalBackground), A: 255})
+	for i, value := range theme.TerminalPalette {
+		s.Term.SetIndexedColor(i, color.RGBA{R: uint8(value >> 16), G: uint8(value >> 8), B: uint8(value), A: 255})
 	}
 }
 

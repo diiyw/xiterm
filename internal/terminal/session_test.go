@@ -170,7 +170,7 @@ func TestPaletteMouseModesAndBracketedPaste(t *testing.T) {
 	s := startShell(t, `stty raw -echo; printf '\033[32mREADY\033[?1000h\033[?1006h\033[?2004h'; dd bs=1 count=15 2>/dev/null | od -An -tx1; printf '\033[?1000l'`)
 	waitFor(t, s, func() bool { return s.MouseTracking })
 	r, g, b, _ := s.ResolveColor(s.Term.CellAt(0, 0).Style.Fg).RGBA()
-	if r>>8 != 0x98 || g>>8 != 0xc3 || b>>8 != 0x79 {
+	if r>>8 != 0x28 || g>>8 != 0x7d || b>>8 != 0x5f {
 		t.Fatalf("custom palette ignored: %x %x %x", r, g, b)
 	}
 	s.Paste("abc")

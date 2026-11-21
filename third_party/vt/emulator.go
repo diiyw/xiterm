@@ -3,6 +3,7 @@ package vt
 import (
 	"image/color"
 	"io"
+	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/ultraviolet/screen"
@@ -49,6 +50,9 @@ type Emulator struct {
 	// The ANSI parser to use.
 	parser *ansi.Parser
 	cb     Callbacks
+	// An incomplete UTF-8 character in the current OSC payload.
+	oscUTF8    [utf8.UTFMax]byte
+	oscUTF8Len int
 
 	// The terminal's icon name and title.
 	iconName, title string
@@ -314,7 +318,18 @@ func (e *Emulator) Write(p []byte) (n int, err error) {
 
 	for i := range p {
 		e.growParserData()
-		e.parser.Advance(p[i])
+		b := p[i]
+		if e.parser.State() == parser.OscStringState && e.oscUTF8Continuation(b) && b == ansi.ST {
+			// The parser treats 0x9C as ST even inside a UTF-8 character.
+			// Use another payload byte for the transition, then restore the original.
+			before := len(e.parser.Data())
+			e.parser.Advance(0x80)
+			if data := e.parser.Data(); len(data) > before {
+				data[before] = b
+			}
+		} else {
+			e.parser.Advance(b)
+		}
 		// Flush the last cluster once the whole slice is written. Every
 		// sequence handler flushes on its own way in, so a cluster only has to
 		// survive until either the next printable character extends it or the
@@ -324,6 +339,28 @@ func (e *Emulator) Write(p []byte) (n int, err error) {
 		}
 	}
 	return len(p), nil
+}
+
+// oscUTF8Continuation reports whether b extends a valid UTF-8 prefix in OSC.
+// Keep the prefix across writes, even when the parser's data buffer is full.
+func (e *Emulator) oscUTF8Continuation(b byte) bool {
+	if n := e.oscUTF8Len; n > 0 {
+		e.oscUTF8[n] = b
+		prefix := e.oscUTF8[:n+1]
+		if !utf8.FullRune(prefix) {
+			e.oscUTF8Len++
+			return true
+		}
+		e.oscUTF8Len = 0
+		if utf8.Valid(prefix) {
+			return true
+		}
+	}
+	if b >= 0xC2 && b <= 0xF4 {
+		e.oscUTF8[0] = b
+		e.oscUTF8Len = 1
+	}
+	return false
 }
 
 // WriteString writes a string to the terminal output buffer.

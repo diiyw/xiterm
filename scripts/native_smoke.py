@@ -128,6 +128,19 @@ def children(pid):
 
 with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
     temp = Path(temp)
+
+    # Record the browser action without launching a browser in the Xvfb session.
+    browser_result = temp / "browser-arguments.json"
+    browser_bin = temp / "browser-bin"
+    browser_bin.mkdir()
+    browser_opener = browser_bin / "xdg-open"
+    browser_opener.write_text(
+        "#!/usr/bin/env python3\nimport json, pathlib, sys\n"
+        f"pathlib.Path({str(browser_result)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+    )
+    browser_opener.chmod(0o755)
+    app_env = os.environ.copy()
+    app_env["PATH"] = str(browser_bin) + os.pathsep + app_env["PATH"]
     marker = temp / "keyboard-ok"
     config = temp / "config.json"
     config.write_text(json.dumps({
@@ -135,7 +148,7 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         "width": 1000, "height": 650,
         "profiles": [{"name": "Smoke", "shell": "/bin/bash", "args": ["--noprofile", "--norc", "-i"], "directory": str(temp), "env": ["PS1=xiterm $ ", f"HISTFILE={temp / 'history'}"]}],
     }))
-    process = subprocess.Popen([str(ROOT / "bin/xiterm"), "-config", str(config)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen([str(ROOT / "bin/xiterm"), "-config", str(config)], env=app_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         root = x11.XDefaultRootWindow(display)
         windows = []
@@ -160,6 +173,20 @@ with tempfile.TemporaryDirectory(prefix="xiterm-smoke-") as temp:
         type_text(f"printf keyboard-ok > {marker}")
         wait_for(lambda: marker.exists(), "Keyboard text and Enter did not reach the PTY")
         assert marker.read_text() == "keyboard-ok"
+        link_ready = temp / "link-ready"
+        link_writer = temp / "link-writer.py"
+        link_url = "http://127.0.0.1:8787/path?a=1&b=2"
+        link_writer.write_text(
+            "import pathlib\n"
+            f"print('\\x1b[2J\\x1b[H工作清单：{link_url}', flush=True)\n"
+            f"pathlib.Path({str(link_ready)!r}).touch()\n"
+        )
+        type_text(f"python3 {link_writer}")
+        wait_for(link_ready.exists, "Link output did not reach the terminal")
+        time.sleep(0.2)
+        click(150, 60)
+        wait_for(browser_result.exists, "Clicking a URL did not open the browser")
+        assert json.loads(browser_result.read_text()) == [link_url], "Browser received an incomplete or split URL"
         # Plain letters, especially c/d/t after a shortcut, must remain text.
         chord("t")
         wait_for(lambda: len(children(process.pid)) == 2, "Shortcut did not open a tab")

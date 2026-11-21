@@ -21,6 +21,7 @@ var shortcutRows = func() [13][2]string {
 }()
 
 func (a *App) draw() {
+	a.updateLinkHover()
 	p := &a.paint
 	p.canvas.ClearColor(background)
 	a.buttons = a.buttons[:0]
@@ -88,12 +89,19 @@ func (a *App) drawSearch() {
 	p.rect(workspace.Rect{Y: y, W: a.width, H: searchH}, surface)
 	p.label("Find", 15, y+10, muted, false)
 	query := a.query
-	if query == "" {
+	preedit := a.textInput.composition.Text
+	if query == "" && preedit == "" {
 		query = "Type to search terminal history…"
 	}
-	p.canvas.PushClipRect(70, y, a.width-340, searchH)
-	p.label(query, 70, y+10, foreground, false)
-	p.canvas.PopClipRect()
+	queryX, preeditX, right := a.searchTextLayout()
+	if right > searchTextX {
+		p.canvas.PushClipRect(searchTextX, y, right-searchTextX, searchH)
+		p.label(query, queryX, y+10, foreground, false)
+		if preedit != "" {
+			p.preedit(preedit, preeditX, y+10, right, foreground, surface)
+		}
+		p.canvas.PopClipRect()
+	}
 	count := "No matches"
 	var number [64]byte
 	if a.searchIndex.Count() > 0 {
@@ -207,7 +215,7 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 				matchIndex++
 			}
 			if matchIndex < len(rowMatches) && x >= rowMatches[matchIndex].Col {
-				bg = rgb(0x66552e)
+				bg = searchHighlight
 			}
 			if x > 0 && bg != runColor {
 				flush(x)
@@ -228,7 +236,19 @@ func (a *App) drawPane(pane *workspace.Pane, active bool) {
 			p.cell(c, x0+float32(x)*p.cellW, y0+float32(y)*p.lineH, fg, bg)
 		}
 	}
-	if active && a.cursorCanBlink() && !a.blink {
+	if hit := a.hoverLink; hit.pane == pane && hit.link.URL != "" {
+		row := hit.link.Row - start
+		if row >= 0 && row < rows {
+			p.rect(workspace.Rect{X: x0 + float32(hit.link.Start)*p.cellW, Y: y0 + float32(row+1)*p.lineH - 2, W: float32(hit.link.End-hit.link.Start+1) * p.cellW, H: 1}, accent)
+		}
+	}
+	if active && !a.search && pane.Scroll == 0 && a.textInput.composition.Text != "" {
+		value := a.textInput.composition.Text
+		caret := a.textInput.config.Caret
+		right := min(x0+float32(cols)*p.cellW, r.X+r.W-12)
+		x := min(caret.X, max(x0, right-p.labelWidth(value)))
+		p.preedit(value, x, caret.Y, right, defaultFG, defaultBG)
+	} else if active && a.cursorCanBlink() && !a.blink {
 		cursor := s.Term.CursorPosition()
 		p.rect(workspace.Rect{X: x0 + float32(cursor.X)*p.cellW, Y: y0 + float32(cursor.Y)*p.lineH + 2, W: 2, H: p.lineH - 4}, accent)
 	}

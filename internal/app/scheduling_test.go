@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,29 @@ import (
 	"github.com/diiyw/xiterm/internal/workspace"
 	"github.com/onix-engine/onix/window"
 )
+
+func TestPollSanitizesWindowTitle(t *testing.T) {
+	term := vt.NewEmulator(80, 24)
+	defer term.Close()
+	session := &terminal.Session{Term: term}
+	pane := &workspace.Pane{Session: session}
+	a := &App{win: &window.Context{}, tabs: []*workspace.Tab{{Root: workspace.Leaf(pane), Active: pane}}}
+	for _, tc := range []struct {
+		name, title, want string
+	}{
+		{"invalid UTF-8", "shell \xff你好", "shell \uFFFD你好"},
+		{"embedded NUL", "a\x00b", "a\uFFFDb"},
+		{"long Unicode title", strings.Repeat("界", 81), strings.Repeat("界", 79) + "…"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session.Title = tc.title
+			a.poll()
+			if want := "XiTerm — " + tc.want; a.lastTitle != want {
+				t.Fatalf("window title = %q, want %q", a.lastTitle, want)
+			}
+		})
+	}
+}
 
 func TestPollRemovesSimultaneouslyExitedPanesAcrossTabs(t *testing.T) {
 	if runtime.GOOS == "windows" {

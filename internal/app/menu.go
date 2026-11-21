@@ -1,6 +1,9 @@
 package app
 
-import "github.com/diiyw/xiterm/internal/workspace"
+import (
+	"github.com/diiyw/xiterm/internal/config"
+	"github.com/diiyw/xiterm/internal/workspace"
+)
 
 type menuItem struct {
 	label, icon string
@@ -27,6 +30,7 @@ const (
 	actionOpenProfile
 	actionFontDelta
 	actionSaveConfig
+	actionThemeCycle
 )
 
 var menuItems = [...]menuItem{
@@ -40,6 +44,7 @@ var menuItems = [...]menuItem{
 	{"Settings", "settings", actionSettings},
 	{"Keyboard shortcuts", "help", actionHelp},
 	{"Close pane", "close", actionClosePane},
+	{"Theme", "settings", actionThemeCycle},
 }
 
 func (a *App) activateButton(action buttonAction, value int) {
@@ -81,6 +86,15 @@ func (a *App) activateButton(action buttonAction, value int) {
 		a.setFontSize(a.cfg.FontSize + value)
 	case actionSaveConfig:
 		a.saveConfig()
+	case actionThemeCycle:
+		names := config.ThemeNames()
+		for index, name := range names {
+			if name == a.cfg.Theme {
+				a.setTheme(names[(index+1)%len(names)])
+				a.notify("Theme changed to " + themeLabel(a.cfg.Theme))
+				break
+			}
+		}
 	}
 	a.dirty = true
 }
@@ -127,6 +141,12 @@ func (a *App) drawContextMenu() {
 			a.paint.rect(workspace.Rect{X: r.X + 5, Y: y, W: r.W - 10, H: rowH}, surface)
 		}
 		a.drawIcon(item.icon, workspace.Rect{X: r.X + 14, Y: y + (rowH-16)/2, W: 16, H: 16}, muted)
-		a.paint.label(item.label, r.X+42, y+(rowH-a.paint.size)/2-1, foreground, false)
+		labelY := y + (rowH-a.paint.size)/2 - 1
+		a.paint.label(item.label, r.X+42, labelY, foreground, false)
+		if item.action == actionThemeCycle {
+			x := r.X + 42 + a.paint.labelWidth(item.label)
+			a.paint.label(": ", x, labelY, foreground, false)
+			a.paint.label(themeLabel(a.cfg.Theme), x+a.paint.labelWidth(": "), labelY, foreground, false)
+		}
 	}
 }

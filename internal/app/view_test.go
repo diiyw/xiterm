@@ -11,7 +11,7 @@ import (
 )
 
 func TestWideCellBackground(t *testing.T) {
-	defaultBG, defaultFG := rgb(0x16191f), rgb(0xd8dee9)
+	defaultBG, defaultFG := rgb(0xf5f1e8), rgb(0x2d3035)
 	for _, tc := range []struct {
 		name, sgr string
 		want      graphics.ColorRGBA

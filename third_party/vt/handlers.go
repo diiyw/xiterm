@@ -871,7 +871,9 @@ func (e *Emulator) registerDefaultCsiHandlers() {
 			bottom = height
 		}
 
-		if top >= bottom {
+		// Buffer scrolling assumes the entire region is inside the screen.
+		// Ignore invalid margins before they can reach direct cell indexing.
+		if top >= bottom || bottom > height {
 			return false
 		}
 
@@ -904,7 +906,7 @@ func (e *Emulator) registerDefaultCsiHandlers() {
 				right = width
 			}
 
-			if left >= right {
+			if left >= right || right > width {
 				return false
 			}
 

@@ -104,6 +104,31 @@ func TestTextInputCaretFollowsSearch(t *testing.T) {
 	}
 }
 
+func TestSearchCompositionUsesVisibleFieldWithoutEditingQuery(t *testing.T) {
+	a := paintApp(t)
+	a.search = true
+	a.query = "keep this query"
+	a.width = 420
+	a.textInputConfig()
+
+	preedit := input.TextComposition{Text: "shu'ru", Active: true}
+	a.textComposition(preedit)
+	queryX, preeditX, right := a.searchTextLayout()
+	config := a.textInputConfig()
+	if config.Caret.X != preeditX || queryX >= searchTextX ||
+		preeditX+a.paint.labelWidth(preedit.Text) > right {
+		t.Fatalf("long query left no room for preedit: query X=%v preedit X=%v right=%v caret=%+v", queryX, preeditX, right, config.Caret)
+	}
+	a.keydown(input.KeyEscape)
+	if !a.search || a.query != "keep this query" || a.searchIndex.Count() != 0 {
+		t.Fatal("IME typing or cancellation changed the search")
+	}
+	a.textComposition(input.TextComposition{})
+	if queryX, _, _ := a.searchTextLayout(); queryX != searchTextX || a.textInput.composition.Text != "" {
+		t.Fatal("search content did not reset after the composition ended")
+	}
+}
+
 func TestCompositionAnchorSurvivesOutputAndResize(t *testing.T) {
 	term := vt.NewEmulator(80, 40)
 	defer term.Close()
@@ -111,8 +136,12 @@ func TestCompositionAnchorSurvivesOutputAndResize(t *testing.T) {
 	a := &App{paint: painter{cellW: 9, lineH: 22}, tabs: []*workspace.Tab{{Root: workspace.Leaf(pane), Active: pane}}}
 	fmt.Fprint(term, "\x1b[38;18H")
 	before := a.textInputConfig()
-	a.textComposition(input.TextComposition{Text: "shi", Active: true})
+	a.textComposition(input.TextComposition{Text: "sh", Active: true})
 	fmt.Fprint(term, "\x1b[8;70Hbackground output")
+	a.textComposition(input.TextComposition{Text: "shu'ru", Active: true})
+	if got := a.textInput.composition.Text; got != "shu'ru" {
+		t.Fatalf("preedit = %q, want the latest composition", got)
+	}
 	if got := a.textInputConfig(); got.Caret != before.Caret || got.Revision != before.Revision {
 		t.Fatalf("background output moved composition: %+v", got)
 	}
@@ -138,10 +167,14 @@ func TestChangingInputTargetRestartsComposition(t *testing.T) {
 	tab := &workspace.Tab{Root: root, Active: left}
 	a := &App{paint: painter{cellW: 9, lineH: 22}, tabs: []*workspace.Tab{tab}}
 	first := a.textInputConfig()
-	a.textComposition(input.TextComposition{Active: true})
+	a.textComposition(input.TextComposition{Text: "shu'ru", Active: true})
 	tab.Active = right
+	a.textComposition(input.TextComposition{Text: "stale", Active: true})
+	if a.textInput.composition.Text != "shu'ru" {
+		t.Fatal("composition update was accepted for the old input target")
+	}
 	next := a.textInputConfig()
-	if next.Revision == first.Revision || a.textInput.composing || next.Caret.X != 512 {
+	if next.Revision == first.Revision || a.textInput.composition != (input.TextComposition{}) || next.Caret.X != 512 {
 		t.Fatalf("pane switch kept old composition: %+v", next)
 	}
 	a.menu = true

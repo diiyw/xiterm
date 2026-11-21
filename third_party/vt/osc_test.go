@@ -2,6 +2,36 @@ package vt
 
 import "testing"
 
+func TestOSCTitlePreservesUTF8(t *testing.T) {
+	for _, tc := range []struct {
+		name, start, title, end string
+	}{
+		{"Chinese with BEL", "\x1b]2;", "列出2025年后最新记录", "\a"},
+		{"Unicode with ESC backslash", "\x1b]0;", "Ü✜𠜎🌜", "\x1b\\"},
+		{"Unicode with standalone ST", "\x9d2;", "本期", "\x9c"},
+		{"ST after invalid UTF-8 prefix", "\x1b]2;", "title\xe0", "\x9c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			term := newTestTerminal(t, 80, 1)
+			var titles []string
+			term.SetCallbacks(Callbacks{Title: func(s string) { titles = append(titles, s) }})
+			input := []byte(tc.start + tc.title + tc.end + "OK")
+			// PTY reads can split both a UTF-8 character and its terminator.
+			for i := range input {
+				if _, err := term.Write(input[i : i+1]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(titles) != 1 || titles[0] != tc.title {
+				t.Errorf("title updates = %q, want [%q]", titles, tc.title)
+			}
+			if got := term.String(); got != "OK" {
+				t.Errorf("screen = %q, want only the text after the title", got)
+			}
+		})
+	}
+}
+
 // OSC 8 wire format per https://gist.github.com/egmontkov/eb6100b9 is
 // ESC ] 8 ; <params> ; <uri> ST. handleHyperlink must store the
 // <params> segment in Link.Params and the <uri> segment in Link.URL.
