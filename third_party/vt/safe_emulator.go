@@ -41,6 +41,13 @@ func (se *SafeEmulator) Resize(w, h int) {
 	se.Emulator.Resize(w, h)
 }
 
+// TrimBuffers reclaims idle capacity under the same lock as Resize and Write.
+func (se *SafeEmulator) TrimBuffers() {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	se.Emulator.TrimBuffers()
+}
+
 // Render renders the emulator's current state in a concurrency-safe manner.
 func (se *SafeEmulator) Render() string {
 	se.mu.RLock()

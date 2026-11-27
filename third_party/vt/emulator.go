@@ -3,6 +3,7 @@ package vt
 import (
 	"image/color"
 	"io"
+	"sync/atomic"
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -71,7 +72,7 @@ type Emulator struct {
 	gsingle int // temporarily select GL or GR
 
 	// Indicates if the terminal is closed.
-	closed bool
+	closed atomic.Bool
 
 	// atPhantom indicates if the cursor is out of bounds.
 	// When true, and a character is written, the cursor is moved to the next line.
@@ -84,10 +85,7 @@ var _ Terminal = (*Emulator)(nil)
 func NewEmulator(w, h int) *Emulator {
 	t := new(Emulator)
 	t.scrs[0] = *NewScreen(w, h)
-	t.scrs[1] = *NewScreen(w, h)
-	// The alternate screen has no user-visible scrollback. Retaining it would
-	// accumulate an inaccessible second history while full-screen apps scroll.
-	t.scrs[1].SetScrollback(nil)
+	// The alternate grid is allocated on first use and has no scrollback.
 	t.scr = &t.scrs[0]
 	t.scrs[0].cb = &t.cb
 	t.scrs[1].cb = &t.cb
@@ -123,9 +121,12 @@ func (t *Emulator) initParser() {
 	})
 }
 
-// TrimBuffers releases unusually large completed control-string buffers. It
-// never discards a sequence split across writes.
+// TrimBuffers reclaims excess screen capacity after a resize and releases
+// large parser buffers once the control string is complete.
 func (t *Emulator) TrimBuffers() {
+	for i := range t.scrs {
+		t.scrs[i].trimBuffer()
+	}
 	if t.parser.State() == parser.GroundState && cap(t.parser.Data()) > initialParserDataSize {
 		t.initParser()
 	}
@@ -281,7 +282,9 @@ func (e *Emulator) Resize(width int, height int) {
 	}
 
 	e.scrs[0].Resize(width, height)
-	e.scrs[1].Resize(width, height)
+	if e.scrs[1].buf != nil {
+		e.scrs[1].Resize(width, height)
+	}
 	e.tabstops = uv.DefaultTabStops(width)
 
 	e.setCursor(x, y)
@@ -293,7 +296,7 @@ func (e *Emulator) Resize(width int, height int) {
 
 // Read reads data from the terminal input buffer.
 func (e *Emulator) Read(p []byte) (n int, err error) {
-	if e.closed {
+	if e.closed.Load() {
 		return 0, io.EOF
 	}
 
@@ -302,17 +305,16 @@ func (e *Emulator) Read(p []byte) (n int, err error) {
 
 // Close closes the terminal.
 func (e *Emulator) Close() error {
-	if e.closed {
+	if e.closed.Swap(true) {
 		return nil
 	}
 
-	e.closed = true
 	return e.pw.CloseWithError(io.EOF) //nolint:wrapcheck
 }
 
 // Write writes data to the terminal output buffer.
 func (e *Emulator) Write(p []byte) (n int, err error) {
-	if e.closed {
+	if e.closed.Load() {
 		return 0, io.ErrClosedPipe
 	}
 

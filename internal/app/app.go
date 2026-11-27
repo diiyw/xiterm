@@ -64,6 +64,7 @@ type App struct {
 	win               *window.Context
 	cfg               config.Config
 	configPath        string
+	pastedImageDir    string
 	tabs              []*workspace.Tab
 	active            int
 	paint             painter
@@ -232,19 +233,26 @@ func (a *App) cursorCanBlink() bool {
 }
 
 func (a *App) idleDeadline() (time.Time, bool) {
+	var deadline time.Time
 	for _, t := range a.tabs {
 		pending := false
-		t.Root.Visit(func(p *workspace.Pane) { pending = pending || p.Session.PendingOutput() })
+		t.Root.Visit(func(p *workspace.Pane) {
+			pending = pending || p.Session.PendingOutput()
+			if next := p.Session.ClipboardPasteDeadline(); !next.IsZero() && (deadline.IsZero() || next.Before(deadline)) {
+				deadline = next
+			}
+		})
 		if pending {
 			return time.Time{}, false
 		}
 	}
-	var deadline time.Time
 	if a.dirty || a.win.FrameRequested() {
 		if !time.Now().Before(a.paintAt) {
 			return time.Time{}, false
 		}
-		deadline = a.paintAt
+		if deadline.IsZero() || a.paintAt.Before(deadline) {
+			deadline = a.paintAt
+		}
 	}
 	if a.cursorCanBlink() {
 		if deadline.IsZero() || a.blinkAt.Before(deadline) {
@@ -327,6 +335,7 @@ func (a *App) newPane(p config.Profile) (*workspace.Pane, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.WriteClipboard = func(value string) { a.setClipboardText(value) }
 	s.ApplyTheme(config.ThemeByName(a.cfg.Theme))
 	s.SetHistoryBudget(a.historyBudget)
 	a.scheduleMemoryTrim(time.Now())
@@ -422,6 +431,9 @@ func (a *App) closeTab(index int) {
 func (a *App) closeAll() {
 	for _, t := range a.tabs {
 		t.Root.Visit(func(p *workspace.Pane) { p.Session.Close() })
+	}
+	if a.pastedImageDir != "" {
+		_ = os.RemoveAll(a.pastedImageDir)
 	}
 }
 func (a *App) notify(message string) {

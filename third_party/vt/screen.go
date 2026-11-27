@@ -11,6 +11,8 @@ type Screen struct {
 	cb *Callbacks
 	// The buffer of the screen.
 	buf *uv.RenderBuffer
+	// A shrink can leave discarded rows and cells in the backing arrays.
+	trimPending bool
 	// The cur of the screen.
 	cur, saved Cursor
 	// scroll is the scroll region.
@@ -75,10 +77,36 @@ func (s *Screen) Resize(width int, height int) {
 	if s.buf == nil {
 		s.buf = uv.NewRenderBuffer(width, height)
 	} else {
+		if width < s.Width() || height < s.Height() {
+			s.trimPending = true
+		}
 		s.buf.Resize(width, height)
 		s.buf.Touched = nil
 	}
 	s.scroll = s.buf.Bounds()
+}
+
+func (s *Screen) trimBuffer() {
+	if !s.trimPending {
+		return
+	}
+	s.trimPending = false
+	s.buf.Lines = trimScreenSlice(s.buf.Lines)
+	for i, line := range s.buf.Lines {
+		s.buf.Lines[i] = trimScreenSlice(line)
+	}
+}
+
+// Keep some capacity for the next resize, but release references outside
+// the visible grid even when the backing array is worth keeping.
+func trimScreenSlice[S ~[]E, E any](data S) S {
+	if cap(data) > 0 && len(data) <= cap(data)/2 {
+		trimmed := make(S, len(data))
+		copy(trimmed, data)
+		return trimmed
+	}
+	clear(data[len(data):cap(data)])
+	return data
 }
 
 // Width returns the width of the screen.

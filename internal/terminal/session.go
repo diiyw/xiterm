@@ -64,6 +64,12 @@ type Session struct {
 	findLine          []byte
 	findColumns       []int
 	findNeedle        []byte
+	pasteEvents       bool
+	clipboardOffer    clipboardOffer
+	clipboardReplies  chan clipboardReply
+
+	// WriteClipboard receives text from OSC 52 on the goroutine calling Poll.
+	WriteClipboard func(string)
 }
 
 func Start(profile config.Profile, cols, rows, scrollback int, wake func()) (*Session, error) {
@@ -81,6 +87,7 @@ func Start(profile config.Profile, cols, rows, scrollback int, wake func()) (*Se
 	// Read responses and keyboard encodings even when the child is backpressured.
 	input := make(chan []byte, ioQueueSize)
 	inputPool := newBytePool(inputBlockSize)
+	s.clipboardReplies = make(chan clipboardReply, 1)
 	go func() {
 		defer close(input)
 		defer close(s.collectorDone)
@@ -106,13 +113,24 @@ func Start(profile config.Profile, cols, rows, scrollback int, wake func()) (*Se
 		defer close(s.writerDone)
 		defer inputPool.clear()
 		failed := false
-		for b := range input {
-			if !failed {
-				err := s.writeProcess(b)
-				failed = err != nil
+		for {
+			select {
+			case b, ok := <-input:
+				if !ok {
+					return
+				}
+				if !failed {
+					failed = s.writeProcess(b) != nil
+				}
+				// Continue draining after an error so the collector can still stop.
+				inputPool.put(b)
+			case reply := <-s.clipboardReplies:
+				if !failed {
+					s.writeMu.Lock()
+					failed = reply.write(s.process) != nil
+					s.writeMu.Unlock()
+				}
 			}
-			// Continue draining after an error so the collector can still stop.
-			inputPool.put(b)
 		}
 	}()
 	go func() {
@@ -156,11 +174,18 @@ func (s *Session) bindCallbacks() {
 			if mode == ansi.ModeCursorKeys {
 				s.applicationCursor = true
 			}
+			if mode == clipboardPasteMode {
+				s.pasteEvents = true
+			}
 			s.mouseMode(mode, true)
 		},
 		DisableMode: func(mode ansi.Mode) {
 			if mode == ansi.ModeCursorKeys {
 				s.applicationCursor = false
+			}
+			if mode == clipboardPasteMode {
+				s.pasteEvents = false
+				s.clipboardOffer = clipboardOffer{}
 			}
 			s.mouseMode(mode, false)
 		},
@@ -172,6 +197,8 @@ func (s *Session) bindCallbacks() {
 		},
 		AltScreen: func(bool) { s.inputCursorSet = false },
 	})
+	s.Term.RegisterOscHandler(52, s.handleClipboard)
+	s.Term.RegisterOscHandler(5522, s.handleClipboardPasteRequest)
 }
 
 // InputPosition keeps IME panels at the insertion point during hidden-cursor
@@ -237,6 +264,9 @@ func (s *Session) PollUntil(deadline time.Time) bool {
 	if limit := time.Now().Add(pollBudget); limit.Before(deadline) {
 		deadline = limit
 	}
+	if deadline := s.ClipboardPasteDeadline(); !deadline.IsZero() && !time.Now().Before(deadline) {
+		s.clipboardOffer = clipboardOffer{}
+	}
 	changed := false
 	if s.pollTransfer() {
 		changed = true
@@ -290,6 +320,7 @@ done:
 		s.CancelTransfer()
 		s.flushZmodemPrefix(true)
 		s.Exited = true
+		s.clipboardOffer = clipboardOffer{}
 		s.ExitErr = err
 		changed = true
 	default:
@@ -378,6 +409,7 @@ func (s *Session) Paste(text string) {
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		close(s.stop)
+		s.clipboardOffer = clipboardOffer{}
 		s.CancelTransfer()
 		if s.ztimer != nil {
 			s.ztimer.Stop()

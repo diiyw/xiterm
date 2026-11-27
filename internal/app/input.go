@@ -197,7 +197,7 @@ func (a *App) bindInput() {
 		if p := a.pane(); p != nil {
 			var paths []string
 			for _, path := range files {
-				paths = append(paths, "'"+strings.ReplaceAll(path, "'", "'\\''")+"'")
+				paths = append(paths, quotePastedPath(path))
 			}
 			p.Session.Paste(strings.Join(paths, " ") + " ")
 		}
@@ -446,38 +446,25 @@ func specialKey(key input.KeyCode) (rune, bool) {
 	}
 	return 0, false
 }
-func (a *App) paste() {
-	value, ok := a.win.ClipboardText()
-	if !ok {
-		a.notify("Clipboard is unavailable")
-		return
-	}
-	if a.search {
-		a.query += value
-		a.updateSearch(true)
-		return
-	}
-	if a.overlay != "" {
-		return
-	}
-	if p := a.pane(); p != nil {
-		p.Session.Paste(value)
-		p.Scroll = 0
-		p.Selected = false
-	}
-}
 func (a *App) copySelection() {
 	p := a.pane()
 	if p == nil || !p.Selected {
 		a.notify("Drag to select terminal text first")
 		return
 	}
-	if !a.win.SetClipboardText(p.Session.Selection(p.SelectionStart, p.SelectionEnd)) {
-		a.notify("Could not copy to clipboard")
-	} else {
+	if a.setClipboardText(p.Session.Selection(p.SelectionStart, p.SelectionEnd)) {
 		a.notify("Selection copied")
 	}
 }
+
+func (a *App) setClipboardText(value string) bool {
+	if a.win.SetClipboardText(value) {
+		return true
+	}
+	a.notify("Could not copy to clipboard")
+	return false
+}
+
 func (a *App) position(p *workspace.Pane, x, y float32) terminal.Position {
 	col := max(0, min(p.Session.Term.Width()-1, int((x-p.Bounds.X-12)/a.paint.cellW)))
 	row := max(0, min(p.Session.Term.Height()-1, int((y-p.Bounds.Y-a.paneHeaderHeight(p)-8)/a.paint.lineH)))

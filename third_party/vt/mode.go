@@ -24,6 +24,7 @@ func (e *Emulator) resetModes() {
 		ansi.ModeSaveCursor:          ansi.ModeReset, // ?1048
 		ansi.ModeAltScreenSaveCursor: ansi.ModeReset, // ?1049
 		ansi.ModeBracketedPaste:      ansi.ModeReset, // ?2004
+		ansi.DECMode(5522):           ansi.ModeReset, // MIME paste events
 	}
 
 	// Set mode effects.
